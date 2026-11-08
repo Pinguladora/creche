@@ -1,0 +1,15 @@
+# cargo-mutants: https://mutants.rs/
+# Mutate the code the unit tests can reach. Loading BPF programs, the guest event
+# loop and the vsock output need a live kernel and VM. The end-to-end runs
+# in a microVM cover them instead.
+examine_globs = [
+    "crates/creche-wire/src/lib.rs",
+    "crates/creche-observer/src/queue.rs",
+    "crates/creche-sink/src/json.rs",
+    "crates/creche-sink/src/stream.rs",
+    "crates/creche-sink/src/tasks.rs",
+    "crates/creche-sink/src/listen.rs",
+]
+test_tool = "nextest"
+# `listen::run` only binds `run_with` (tested end to end) to stdout.
+exclude_re = ['creche-sink/src/listen\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)']
