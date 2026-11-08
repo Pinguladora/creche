@@ -1,0 +1,22 @@
+# Strict core: the decoder must not allocate. Clippy uses the nearest
+# clippy.toml, so this file also repeats the workspace's test allowances.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+disallowed-types = [
+    { path = "alloc::boxed::Box", reason = "the decoder borrows from its input", allow-invalid = true },
+    { path = "alloc::string::String", reason = "the decoder borrows from its input", allow-invalid = true },
+    { path = "alloc::vec::Vec", reason = "the decoder borrows from its input", allow-invalid = true },
+    { path = "std::boxed::Box", reason = "the decoder borrows from its input", allow-invalid = true },
+    { path = "std::string::String", reason = "the decoder borrows from its input", allow-invalid = true },
+    { path = "std::vec::Vec", reason = "the decoder borrows from its input", allow-invalid = true },
+]
+
+disallowed-macros = [
+    { path = "alloc::format", reason = "write into a caller-owned sink", allow-invalid = true },
+    { path = "alloc::vec", reason = "use slices or arrays", allow-invalid = true },
+    { path = "std::format", reason = "write into a caller-owned sink", allow-invalid = true },
+    { path = "std::vec", reason = "use slices or arrays", allow-invalid = true },
+]
