@@ -212,7 +212,9 @@ static __always_inline struct sent_slot *sync_task(void)
 	n = bpf_probe_read_kernel_str(e->cgroup, sizeof(e->cgroup), t->cgroups->dfl_cgrp->kn->name);
 	if (n < 0)
 		n = 0;
-	if (output(e, __builtin_offsetof(struct ev_task, cgroup) + (n & (CGROUP_LEN - 1))))
+	if (n > CGROUP_LEN)
+		n = CGROUP_LEN;
+	if (output(e, __builtin_offsetof(struct ev_task, cgroup) + n))
 		return 0;
 	s->tgid = tgid;
 	s->epoch = *ep;
@@ -443,7 +445,9 @@ int on_open(__u64 *ctx)
 	n = bpf_d_path(&f->f_path, e->path, sizeof(e->path));
 	if (n < 0)
 		n = 0;
+	if (n > PATH_LEN)
+		n = PATH_LEN;
 	e->path_len = n;
-	output(e, __builtin_offsetof(struct ev_open, path) + (n & (PATH_LEN - 1)));
+	output(e, __builtin_offsetof(struct ev_open, path) + n);
 	return 0;
 }
