@@ -1,0 +1,32 @@
+[package]
+name = "creche-wire"
+description = "Wire format between the creche guest observer and the host sink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Criterion drives the benchmarks: keep libtest out of `cargo bench`.
+[lib]
+bench = false
+
+[dependencies]
+zerocopy.workspace = true
+
+[features]
+# Sample record streams for benchmarks (module `sample`).
+sample = []
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "decode"
+harness = false
+required-features = ["sample"]
+
+[lints]
+workspace = true
