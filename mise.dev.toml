@@ -1,0 +1,22 @@
+# Local development tooling, layered on top of mise.toml when the `dev` env is
+# active. .miserc.toml sets `env = ["dev"]`, so this loads by default for local
+# work but never in CI (CI sets MISE_ENV=ci). Everything here is lint, format,
+# hook or mutation testing tooling that builds and tests never need.
+
+[env]
+HK_MISE = 1
+
+[hooks]
+# Install or update the git hooks when tools are installed. Lives here, not in
+# mise.toml, so it does not run in CI, where hk is not installed.
+postinstall = "hk install --mise"
+
+[tools]
+# hk and the pkl CLI it evaluates hk.pkl with. Keep hk in step with hk.pkl's import.
+"aqua:jdx/hk" = "2.11.0"
+"aqua:apple/pkl" = "0.32.2"
+yamlfmt = "0.21.0"                 # YAML formatter (hk pairs it with yamllint)
+yamllint = "1.38.0"
+kingfisher = "2.16.0"              # secret scanner (hk)
+"github:sourcefrog/cargo-mutants" = "27.1.0"   # mutation testing (mise run mutants)
+pinact = "5.0.0"                   # pin GitHub Actions to a SHA (hk pre-push)

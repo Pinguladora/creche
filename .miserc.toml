@@ -1,0 +1,3 @@
+# Default active mise environments for local work: `dev` layers on the local-only
+# tooling (mise.dev.toml). CI overrides this with MISE_ENV=ci.
+env = ["dev"]
