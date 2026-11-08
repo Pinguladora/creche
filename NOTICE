@@ -1,0 +1,8 @@
+creche
+Copyright 2026 Pinguladora
+
+Licensed under the Apache License, Version 2.0 (see the LICENSE file).
+
+The eBPF programs in crates/creche-observer/bpf are licensed under
+GPL-2.0-only OR BSD-2-Clause, as their SPDX headers state: the kernel only lets
+GPL-compatible programs use the BPF helpers they call.
