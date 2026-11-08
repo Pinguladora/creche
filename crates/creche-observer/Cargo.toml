@@ -1,0 +1,40 @@
+[package]
+name = "creche-observer"
+description = "Guest-side eBPF observer for Kata microVMs: streams process, connect and file-write events to the host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Criterion drives the benchmarks: keep libtest out of `cargo bench`.
+[lib]
+bench = false
+
+[[bin]]
+name = "creche-observer"
+bench = false
+
+[dependencies]
+creche-wire.workspace = true
+anyhow.workspace = true
+aya.workspace = true
+lexopt.workspace = true
+nix = { workspace = true, features = ["event", "feature", "resource", "socket", "time"] }
+zerocopy.workspace = true
+
+[build-dependencies]
+creche-wire.workspace = true
+
+[dev-dependencies]
+aya-obj.workspace = true
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "queue"
+harness = false
+
+[lints]
+workspace = true
