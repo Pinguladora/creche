@@ -1,0 +1,96 @@
+amends "package://github.com/jdx/hk/releases/download/v2.11.0/hk@2.11.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.11.0/hk@2.11.0#/Builtins.pkl"
+
+// Run every step to the end and report all failures. Aborting on the first one
+// kills cargo-deny in the middle of its advisory database update and leaves a
+// stale git lock in ~/.cargo/advisory-dbs that fails every later run.
+fail_fast = false
+
+// Fast checks and fixers, run on every commit.
+local pre_commit = new Mapping<String, Step> {
+    ["check-added-large-files"] = (Builtins.check_added_large_files) { exclude = Regex(#"^\.hk/"#) }
+    ["check-case-conflict"] = (Builtins.check_case_conflict) { exclude = Regex(#"^\.hk/"#) }
+    ["check-executables-have-shebangs"] = (Builtins.check_executables_have_shebangs) { exclude = Regex(#"^\.hk/"#) }
+    ["check-yaml"] = (Builtins.yamllint) { exclude = Regex(#"^\.hk/"#) }
+    // Format YAML, but never the generated pnpm lockfile.
+    ["yamlfmt"] = (Builtins.yamlfmt) { exclude = Regex(#"(^|/)pnpm-lock\.yaml$|^\.hk/"#) }
+    ["check-json"] = (Builtins.jq) { exclude = Regex(#"(\.devcontainer|\.vscode)/.*\.json|^\.hk/"#) }
+    ["end-of-file-fixer"] = (Builtins.newlines) { exclude = Regex(#"^\.hk/"#) }
+    ["fix-byte-order-marker"] = (Builtins.byte_order_marker) { exclude = Regex(#"^\.hk/"#) }
+    ["fix-smart-quotes"] = (Builtins.fix_smart_quotes) { exclude = Regex(#"^\.hk/"#) }
+    ["mixed-line-ending"] = (Builtins.mixed_line_ending) { exclude = Regex(#"^\.hk/"#) }
+    ["trailing-whitespace"] = (Builtins.trailing_whitespace) { exclude = Regex(#"^\.hk/"#) }
+    ["kingfisher"] = (Builtins.kingfisher) { exclude = Regex(#"^\.hk/"#) }
+    // The root Cargo.toml is a virtual workspace manifest with no targets of its
+    // own, so cargo fmt needs --all there (harmless for member manifests). The
+    // effects let `hk run check --safe` (the agent Stop hook) run them.
+    ["cargo-fmt"] = (Builtins.cargo_fmt) {
+        check = new CommandSpec {
+            command = "cargo fmt --all --check --manifest-path {{workspace_indicator}}"
+            effect = "read"
+        }
+        check_list_files = new CommandSpec {
+            command = "cargo fmt --all --check --manifest-path {{workspace_indicator}} -- --files-with-diff"
+            effect = "read"
+        }
+        fix = new CommandSpec {
+            command = "cargo fmt --all --manifest-path {{workspace_indicator}}"
+            effect = "write"
+        }
+    }
+}
+
+// Slower checks, run before push (matches the original prek stages).
+local pre_push = new Mapping<String, Step> {
+    // GitHub Actions hardening: pin actions to a SHA, lint the workflows, and run
+    // zizmor's security static analysis. zizmor is pinned to offline mode here
+    // (ZIZMOR_OFFLINE) so the pre-push hook stays fast and needs no token. The
+    // lint-gha workflow runs the online audits in CI.
+    ["pinact"] = Builtins.pinact
+    ["actionlint"] = Builtins.actionlint
+    ["zizmor"] = (Builtins.zizmor) { env { ["ZIZMOR_OFFLINE"] = "true" } }
+    // Rust: lint every target (tests included) as errors, and check dependency
+    // licenses, advisories, bans and sources (deny.toml).
+    ["cargo-clippy"] = (Builtins.cargo_clippy) {
+        check = new CommandSpec {
+            command = "cargo clippy --manifest-path {{workspace_indicator}} --workspace --all-targets --all-features --locked --quiet -- -D warnings"
+            effect = "read"
+        }
+    }
+    // One run for the whole workspace: per-member runs would update the shared
+    // advisory database concurrently and collide on its git lock.
+    ["cargo-deny"] = (Builtins.cargo_deny) { workspace_indicator = "deny.toml" }
+}
+
+hooks {
+    ["commit-msg"] {
+        steps {
+            ["cocogitto-commit-msg"] = (Builtins.cocogitto_commit_msg)
+        }
+    }
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps {
+            ...pre_commit
+        }
+    }
+    ["pre-push"] {
+        steps {
+            ...pre_push
+        }
+    }
+    ["check"] {
+        steps {
+            ...pre_commit
+            ...pre_push
+        }
+    }
+    ["fix"] {
+        fix = true
+        steps {
+            ...pre_commit
+            ...pre_push
+        }
+    }
+}

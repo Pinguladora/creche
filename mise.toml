@@ -1,0 +1,51 @@
+[settings]
+experimental = true
+env_cache = true
+env_cache_ttl = "9h"
+minimum_release_age = "7d"
+pin = true
+lockfile = true
+locked = false
+prefer_offline = true
+disable_default_registry = true
+disable_backends = ["asdf", "vfox", "ubi"]
+# Lock only x64 platforms. conda:verapdf (the PDF/UA validator) has no arm64 build
+# on conda-forge, so locking arm64 makes lock-file maintenance fail to resolve it.
+# mise has no per-tool platform scoping so this is global. arm64 dev still works
+# through live resolution (locked = false), just unlocked. Revisit for arm64 later.
+lockfile_platforms = ["linux-x64", "linux-x64-musl", "macos-x64", "windows-x64"]
+# Decide task freshness by hashing source contents, not mtimes. A fresh checkout
+# resets mtimes, so mtime comparison would rebuild needlessly, while content
+# hashing skips when the bytes are equal.
+task.source_freshness_hash_contents = true
+
+[tools]
+mr-boxington = { version = "1.29.1", workflow = "release.yml@refs/heads/main" }
+# The guest observer ships as a static musl binary (the Kata guest image is not
+# guaranteed to have a compatible libc).
+rust = { version = "1.99.1", mr_boxington = true, components = "clippy,rustfmt", targets = "x86_64-unknown-linux-musl" }
+"github:nextest-rs/nextest" = "cargo-nextest-0.9.150"
+"github:sourcefrog/cargo-mutants" = "27.1.0"
+# hk and the pkl CLI it evaluates hk.pkl with. Keep hk in step with hk.pkl's import.
+"aqua:jdx/hk" = "2.11.0"
+"aqua:apple/pkl" = "0.32.2"
+yamlfmt = "0.21.0"
+kingfisher = "2.16.0"
+yamllint = "1.38.0"
+cargo-deny = "0.20.2"
+
+[tasks.test]
+description = "Unit, property and doc tests, then again with debug assertions on a release build"
+run = [
+    "cargo nextest run --workspace --all-features --locked",
+    "cargo nextest run --workspace --all-features --locked --cargo-profile release-assertions",
+    "cargo test --workspace --all-features --locked --doc",
+]
+
+[tasks.bench]
+description = "Criterion benchmarks: wire decoding, observer queue, sink rendering"
+run = "cargo bench --workspace --all-features --benches"
+
+[tasks.mutants]
+description = "Mutation testing, must report 0 missed"
+run = "cargo mutants --workspace --config mutants.toml"
