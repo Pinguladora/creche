@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "hk": {
+      "args": [
+        "mcp",
+        "--root",
+        "."
+      ],
+      "command": "hk",
+      "type": "stdio"
+    },
+    "mise": {
+      "args": [
+        "mcp"
+      ],
+      "command": "mise",
+      "type": "stdio"
+    }
+  }
+}
