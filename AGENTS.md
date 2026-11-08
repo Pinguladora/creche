@@ -13,7 +13,10 @@
 
 ## Tools
 
-- Tools come from mise (`mise.toml`). Pin new ones with `mise use --pin`.
+- Tools come from mise. `mise.toml` holds what local work and CI both need,
+  `mise.dev.toml` the local-only lint, format and hook tooling (loaded through
+  `.miserc.toml`), `mise.ci.toml` what only CI needs (`MISE_ENV=ci`). Pin new
+  ones with `mise use --pin`, adding `--env dev` or `--env ci` for those layers.
 - Builds go through mr-boxington. Use plain `cargo`, not a custom target dir.
 - Tests: `mise run test` (nextest, the `release-assertions` profile and doc
   tests). Mutation testing: `mise run mutants`, which must report 0 missed.

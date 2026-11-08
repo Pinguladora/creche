@@ -1,0 +1,8 @@
+# CI-only tooling and tasks, layered onto mise.toml when MISE_ENV=ci.
+
+[tasks."ci:git-config"]
+run = """
+git config --global core.compression 0
+git config --global core.fsync -all
+"""
+description = "Optimize Git config for CI (disable compression, fsync)"
