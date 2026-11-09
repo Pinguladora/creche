@@ -2,7 +2,7 @@
 
 use anyhow::{Context as _, Result, anyhow};
 use aya::maps::{Array, MapData, PerCpuArray, RingBuf};
-use aya::programs::{BtfTracePoint, FEntry, Program};
+use aya::programs::{BtfTracePoint, FEntry, Lsm, Program};
 use aya::{Btf, Ebpf, EbpfLoader};
 
 /// Byte buffer with an alignment the ELF parser can rely on.
@@ -64,6 +64,8 @@ pub struct Probes {
     epoch: Array<MapData, u32>,
     /// Only exec, fork and exit are reported (the kernel lacks fentry support).
     pub process_only: bool,
+    /// Connects to the guarded port the guard has seen, when it is attached.
+    guard_seen: Option<Array<MapData, u64>>,
 }
 
 impl Probes {
@@ -73,17 +75,25 @@ impl Probes {
     ///
     /// When the kernel has no BTF, rejects the object, or cannot attach the
     /// process hooks. Missing fentry support only disables connect and
-    /// file-write events.
-    pub fn load(dedup: bool, stage: Stage) -> Result<Self> {
+    /// file-write events. Missing BPF LSM support only leaves `port` unguarded.
+    ///
+    /// With a `port`, guards it: no other guest process may connect to the host
+    /// on that vsock port. [`Probes::guarded`] tells whether the guard runs.
+    pub fn load(dedup: bool, stage: Stage, port: Option<u32>) -> Result<Self> {
         // Parsed once and shared: the loader needs it for the CO-RE relocations
         // and the programs to find their attach targets. Each parse of the
         // kernel's BTF costs milliseconds of startup in the guest.
         let btf = Btf::from_sys_fs().context("reading kernel BTF from /sys/kernel/btf/vmlinux")?;
         let dedup = u8::from(dedup);
+        // The guard is off while its process is 0.
+        let guard_tgid = port.map_or(0, |_| std::process::id());
+        let guard_port = port.unwrap_or(0);
         let mut ebpf = EbpfLoader::new()
             .btf(&btf)
             .override_global("dedup_enabled", &dedup, true)
             .override_global("stage", &stage.code(), true)
+            .override_global("guard_tgid", &guard_tgid, true)
+            .override_global("guard_port", &guard_port, true)
             .load(object())
             .context("loading the BPF object")?;
 
@@ -110,6 +120,12 @@ impl Probes {
             }
         }
 
+        let guard_seen = if port.is_some() && guard(&mut ebpf, &btf) {
+            Some(Array::try_from(take_map(&mut ebpf, "guard_seen")?)?)
+        } else {
+            None
+        };
+
         let events = RingBuf::try_from(take_map(&mut ebpf, "events")?)?;
         let drops = PerCpuArray::try_from(take_map(&mut ebpf, "drops")?)?;
         let epoch = Array::try_from(take_map(&mut ebpf, "epoch")?)?;
@@ -119,7 +135,20 @@ impl Probes {
             drops,
             epoch,
             process_only,
+            guard_seen,
         })
+    }
+
+    /// Whether only this process can connect to the host on the guarded port:
+    /// the guard is attached and has seen a connect, the observer's own among
+    /// them. An LSM program attaches even when BPF LSM is not among the
+    /// kernel's active LSMs, and then never runs, so attaching alone proves
+    /// nothing.
+    #[must_use]
+    pub fn guarded(&self) -> bool {
+        self.guard_seen
+            .as_ref()
+            .is_some_and(|seen| seen.get(&0, 0).is_ok_and(|n| n > 0))
     }
 
     /// Makes every process send its context again with its next record. Call
@@ -162,6 +191,21 @@ impl Probes {
     }
 }
 
+/// Attaches the vsock guard. Whether it attached.
+fn guard(ebpf: &mut Ebpf, btf: &Btf) -> bool {
+    let attached = program(ebpf, "guard_connect")
+        .and_then(|p| Ok(<&mut Lsm>::try_from(p)?))
+        .and_then(|prog| {
+            prog.load("socket_connect", btf)?;
+            prog.attach()?;
+            Ok(())
+        });
+    if let Err(e) = &attached {
+        eprintln!("creche-observer: guard unavailable ({e:#}), the vsock port is unguarded");
+    }
+    attached.is_ok()
+}
+
 fn program<'a>(ebpf: &'a mut Ebpf, name: &str) -> Result<&'a mut Program> {
     ebpf.program_mut(name)
         .ok_or_else(|| anyhow!("program {name} missing from the BPF object"))
@@ -183,13 +227,23 @@ mod tests {
     #[test]
     fn object_has_every_program_and_map() {
         let object = Object::parse(object()).unwrap();
-        for (name, _) in TRACEPOINTS.iter().chain(&FENTRIES) {
-            assert!(
-                object.programs.contains_key(*name),
-                "missing program {name}"
-            );
+        for name in TRACEPOINTS
+            .iter()
+            .chain(&FENTRIES)
+            .map(|(name, _)| *name)
+            .chain(["guard_connect"])
+        {
+            assert!(object.programs.contains_key(name), "missing program {name}");
         }
-        for map in ["events", "drops", "scratch_map", "dedup", "sent", "epoch"] {
+        for map in [
+            "events",
+            "drops",
+            "scratch_map",
+            "dedup",
+            "sent",
+            "epoch",
+            "guard_seen",
+        ] {
             assert!(object.maps.contains_key(map), "missing map {map}");
         }
         assert!(

@@ -228,6 +228,10 @@ impl HelloFlags {
     pub const DEDUP: Self = Self(1);
     /// The kernel lacks fentry support: only exec, fork and exit are reported.
     pub const PROCESS_ONLY: Self = Self(2);
+    /// Only the observer can connect to the host on its port: a BPF LSM program
+    /// refuses every other guest process. Without it, any guest process could
+    /// send records the host takes for the observer's.
+    pub const GUARDED: Self = Self(4);
 
     /// Raw bit value.
     #[must_use]
@@ -341,6 +345,14 @@ pub enum DecodeError {
         /// The length found in the header.
         len: u16,
     },
+    /// A variable-length field is longer than its maximum, or its length field
+    /// disagrees with the bytes the record carries.
+    BadField {
+        /// The record kind.
+        kind: Kind,
+        /// The length found in the header.
+        len: u16,
+    },
 }
 
 impl fmt::Display for DecodeError {
@@ -348,6 +360,12 @@ impl fmt::Display for DecodeError {
         match self {
             Self::BadLength { len } => write!(f, "record length {len} out of bounds"),
             Self::Truncated { kind, len } => write!(f, "{kind:?} record truncated to {len} bytes"),
+            Self::BadField { kind, len } => {
+                write!(
+                    f,
+                    "{kind:?} record of {len} bytes has a field out of bounds"
+                )
+            }
         }
     }
 }
@@ -510,6 +528,10 @@ fn decode_body(kind: Kind, header: Header, rec: &[u8]) -> Result<Body<'_>, Decod
         kind,
         len: header.len,
     };
+    let bad_field = DecodeError::BadField {
+        kind,
+        len: header.len,
+    };
     // Variable-length records are cut after their last used byte, so their tail
     // field runs from its offset to the end of the record.
     let tail = |offset: usize| rec.get(offset..).ok_or(truncated);
@@ -530,6 +552,9 @@ fn decode_body(kind: Kind, header: Header, rec: &[u8]) -> Result<Body<'_>, Decod
                 ),
                 _ => return Err(truncated),
             };
+            if path_len > PATH_LEN || args_len > ARGS_LEN {
+                return Err(bad_field);
+            }
             let data = offset_of!(ExecRecord, data);
             let args_at = data.checked_add(path_len).ok_or(truncated)?;
             Body::Exec {
@@ -538,10 +563,17 @@ fn decode_body(kind: Kind, header: Header, rec: &[u8]) -> Result<Body<'_>, Decod
                 args: trim_trailing_nuls(field(args_at, args_len)?),
             }
         }
-        Kind::Task => Body::Task {
-            context: context(rec).ok_or(truncated)?,
-            cgroup: until_nul(tail(offset_of!(TaskRecord, cgroup))?),
-        },
+        Kind::Task => {
+            let context = context(rec).ok_or(truncated)?;
+            let cgroup = tail(offset_of!(TaskRecord, cgroup))?;
+            if cgroup.len() > CGROUP_LEN {
+                return Err(bad_field);
+            }
+            Body::Task {
+                context,
+                cgroup: until_nul(cgroup),
+            }
+        }
         Kind::Fork => {
             let (f, _) = ForkRecord::read_from_prefix(rec).map_err(|_| truncated)?;
             Body::Fork { ppid: f.ppid }
@@ -559,9 +591,20 @@ fn decode_body(kind: Kind, header: Header, rec: &[u8]) -> Result<Body<'_>, Decod
                 port: c.dport,
             }
         }
-        Kind::OpenWrite => Body::OpenWrite {
-            path: until_nul(tail(offset_of!(OpenRecord, path))?),
-        },
+        Kind::OpenWrite => {
+            let path_len = field(offset_of!(OpenRecord, path_len), 4)?
+                .first_chunk()
+                .map(|len| u32::from_ne_bytes(*len))
+                .ok_or(truncated)?;
+            let path = tail(offset_of!(OpenRecord, path))?;
+            // The record ends right after the path, so the two lengths agree.
+            if path.len() > PATH_LEN || usize::try_from(path_len) != Ok(path.len()) {
+                return Err(bad_field);
+            }
+            Body::OpenWrite {
+                path: until_nul(path),
+            }
+        }
         Kind::Hello => {
             let (h, _) = HelloRecord::read_from_prefix(rec).map_err(|_| truncated)?;
             Body::Hello {

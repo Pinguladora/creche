@@ -2,7 +2,7 @@
 
 use std::io::Write as _;
 
-use creche_wire::{Body, Kind, Record};
+use creche_wire::{Body, HelloFlags, Kind, Record};
 
 use crate::k8s::{Pod, Unresolved};
 use crate::tasks::TaskInfo;
@@ -139,6 +139,11 @@ pub fn render(
         Body::Hello { version, flags } => {
             line.num(key!("creche.wire.version"), version);
             line.num(key!("creche.observer.flags"), flags.bits());
+            let guarded = flags.contains(HelloFlags::GUARDED);
+            line.raw(
+                key!("creche.observer.guarded"),
+                if guarded { "true" } else { "false" },
+            );
         }
         Body::Heartbeat(hb) => {
             line.num(key!("creche.observer.ringbuf_drops"), hb.ringbuf_drops);
@@ -333,7 +338,7 @@ fn push_u64(out: &mut Vec<u8>, mut n: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use creche_wire::{Context, Header, HeartbeatRecord, HelloFlags};
+    use creche_wire::{Context, Header, HeartbeatRecord};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn header(kind: Kind) -> Header {
@@ -527,6 +532,17 @@ mod tests {
             ),
             (Some(3), Some(1))
         );
+        assert_eq!(v["creche.observer.guarded"], false);
+        let v = rendered_with(
+            Kind::Hello,
+            Body::Hello {
+                version: 3,
+                flags: HelloFlags::DEDUP.with(HelloFlags::GUARDED),
+            },
+            None,
+        );
+        assert_eq!(v["creche.observer.flags"], 5);
+        assert_eq!(v["creche.observer.guarded"], true);
 
         let hb = HeartbeatRecord {
             ringbuf_drops: 1,
