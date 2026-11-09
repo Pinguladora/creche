@@ -31,8 +31,9 @@ rust = { version = "1.99.1", mr_boxington = true, components = "clippy,rustfmt",
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.150"
 cargo-deny = "0.20.2"
 cocogitto = "7.0.0"
-actionlint = "1.7.12"
 zizmor = "1.30.1"
+jactionlint = { version = "2.4.0", workflow = "release.yaml" }
+trivy = "0.76.1"
 
 [tasks.test]
 description = "Unit, property and doc tests, then again with debug assertions on a release build"
@@ -49,3 +50,23 @@ run = "cargo bench --workspace --all-features --benches"
 [tasks.mutants]
 description = "Mutation testing, must report 0 missed"
 run = "cargo mutants --workspace --config mutants.toml"
+
+[tasks.bump]
+description = "Calculate the next versions from conventional commits, then tag and push"
+run = "cog bump --auto"
+
+[tasks."lint:gha"]
+# jactionlint catches workflow syntax and expression errors and applies the
+# security and policy rules of its default profile (.github/jactionlint.yaml).
+# zizmor runs its security static analysis alongside, offline without a token
+# (local) and with the online audits when GITHUB_TOKEN is set (the lint-gha job).
+run = [
+  "jactionlint --color --shellcheck=",
+  "zizmor --config .github/zizmor.yml .github/workflows",
+]
+description = "Lint and security-audit the GitHub Actions workflows (jactionlint + zizmor)"
+sources = [".github/workflows/**", ".github/zizmor.yml"]
+
+[tasks."scan:trivy"]
+description = "Scan for vulnerabilities, misconfigurations and licences with Trivy (report only)"
+run = "trivy fs --config trivy.yaml ."
