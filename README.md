@@ -52,7 +52,7 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   sandbox's OCI spec from containerd's root-only bundle directory and takes the
   pod's name, namespace and uid from the annotations containerd sets from
   kubelet's request. The spec must name the same sandbox and be a sandbox's, and
-  the bundle must be private to root or the sink's user. Otherwise every line says
+  the bundle must be owned by root and private to it. Otherwise every line says
   why the pod is unknown, and nothing is guessed.
 - **The container is the guest's claim, checked.** A process's guest cgroup
   (`cri-containerd-<id>.scope`) claims a container. The sink reports it as

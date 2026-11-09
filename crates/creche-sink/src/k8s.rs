@@ -55,8 +55,7 @@ pub struct Pod {
 pub enum Unresolved {
     /// No bundle for this sandbox: not a Kubernetes pod, or another runtime.
     NoBundle,
-    /// The bundle or its spec could be written by someone other than root or
-    /// this process's user.
+    /// The bundle or its spec could be written by someone other than root.
     Untrusted,
     /// The spec could not be read, or is larger than any sandbox spec.
     Unreadable,
@@ -232,11 +231,20 @@ impl Containers {
     }
 }
 
-/// Users whose files are trusted: root and the user this process runs as, read
-/// from the owner of `/proc/self`.
-fn trusted_owners() -> [u32; 2] {
+/// Users whose bundles are trusted: root, which owns the container runtime's
+/// bundles. A bundle any other user can write could name any pod, even the
+/// sink's own user when it runs as the VMM's.
+#[cfg(not(test))]
+fn trusted_owners() -> Vec<u32> {
+    vec![0]
+}
+
+/// Tests cannot create root-owned files, so they also trust their own user,
+/// read from the owner of `/proc/self`.
+#[cfg(test)]
+fn trusted_owners() -> Vec<u32> {
     let me = fs::metadata("/proc/self").map_or(0, |m| m.uid());
-    [0, me]
+    vec![0, me]
 }
 
 /// Whether only a trusted owner can enter or change the directory `dir`.
