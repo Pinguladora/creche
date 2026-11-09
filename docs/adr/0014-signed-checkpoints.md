@@ -23,7 +23,11 @@ backwards, and the current key is then erased.
 A verifier checks the SVID against a SPIFFE trust bundle as of the stream's
 start, that its SPIFFE ID is one of the sinks it expects, the first key's
 signature, then every checkpoint's signature in turn. Any workload in the trust
-domain has an SVID, so the expected sink IDs are required.
+domain has an SVID, so the expected sink IDs are required. Each node's sink needs
+an ID of its own, and a verifier that knows which node ran which sandbox, for
+example from the cluster's pod history, should check that the stream's sink is
+the one on that node. Otherwise any authorised sink could sign a stream for a
+sandbox on another node.
 
 ## Alternatives
 
@@ -45,7 +49,8 @@ Taking over the sink yields only the current stream keys, so checkpoints signed
 before are sealed. Lines after the last checkpoint, at most about a second of a
 stream, are not. Whoever steals an SVID key can fabricate whole new streams in an
 archive copy, backdated to any time the SVID was valid, even after it expired.
-Copies already exported elsewhere expose them, and a trusted timestamp, such as a
-transparency log entry, would bound them. Only
+It can even replace a sealed stream under the same id with a new chain that
+verifies. Copies already exported elsewhere expose both, and a trusted timestamp
+for each stream's first key, such as a transparency log entry, would bound them. Only
 P-256 SVIDs, SPIRE's default, are supported. A stream started before the agent
 handed over an SVID is not signed, and a verifier with a bundle reports it.

@@ -18,10 +18,12 @@ Observe with eBPF in the guest kernel, from a small daemon (`creche-observer`)
 started from the guest image before kata-agent, and decode on the host. The
 guest sends process execs, forks and exits, opens of files for writing, and
 connects. It does not report each write, so writes through a descriptor opened
-before the observer started, or inherited, leave no file event. Opens on pseudo
-filesystems, character devices, FIFOs and sockets are left out, and with dedup on,
-repeated opens of a file by one process within a second are reported once. No
-event is therefore no proof that nothing was opened.
+before the observer started, or inherited, leave no file event. Opens of
+character devices, FIFOs and sockets are left out, and so are opens on a fixed
+list of kernel filesystems (proc, sysfs, cgroup, debugfs, tracefs, bpf,
+securityfs, devpts and a few more). Other filesystems, tmpfs among them, are
+reported. With dedup on, repeated opens of a file by one process within a second
+are reported once. No event is therefore no proof that nothing was opened.
 
 ## Alternatives
 

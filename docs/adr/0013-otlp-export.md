@@ -23,8 +23,12 @@ cleartext to a collector on the node.
 - Each stream is one resource: its sandbox, pod and stream id.
 - Lines reach the exporter through a bounded queue. When it is full, they are
   dropped from the export only, counted, and show as gaps in `creche.seq`
-  downstream, unless they were a stream's last lines or all of them, which only
-  an independent signal, such as the sink's own archive, reveals. Transient failures are retried with backoff, permanent ones drop
+  downstream, unless they were a stream's last lines or all of them, or a refusal
+  line, which belongs to no stream. Only an independent signal, such as the
+  sink's own archive, reveals those.
+- A retry after a lost response can deliver lines twice. Byte-identical
+  duplicates of a line are not tampering, so reconstruction keeps one copy of
+  each, while two different lines with the same `creche.seq` stay a failure. Transient failures are retried with backoff, permanent ones drop
   the request.
 - gRPC uses `h2` directly, messages are a hand-written `prost` subset of the
   OTLP protos, and zstd is `ruzstd`. All are pure Rust, so the sink still builds

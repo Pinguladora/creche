@@ -33,10 +33,15 @@ cgroup, a delegated cgroup v2 subtree inside its container, under its own uid.
 Only that uid may write the `cgroup.procs` files of its subtree, and no agent may
 write those of a common ancestor. Moving a process needs write access to both the
 destination's and the common ancestor's `cgroup.procs`, so no agent can move a
-process into another's cgroup. Each agent's files are closed to the other uids,
-by mode and ACL, or kept on a separate filesystem, and no agent may gain a
-privilege that changes its uid, such as `CAP_SETUID` or a setuid binary. creche reports the cgroup and uid on every event, and
-maps a cgroup to an agent name only as a tier 3 claim.
+process into another's cgroup. Each agent's files are closed to the other uids by
+mode and ACL, and a filesystem of its own is not enough unless the other agents
+cannot reach its mount. No agent may gain a privilege that changes its uid, such
+as `CAP_SETUID` or a setuid binary, or one that bypasses file permissions, such as
+`CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH` or `CAP_FOWNER`. creche reports the
+cgroup and uid with an event whenever it holds the process's context, which a
+lost task record or the sink's eviction at capacity can take away until the
+context is sent again ([0006](0006-context-once.md)). It maps a cgroup to an
+agent name only as a tier 3 claim.
 
 Where identity must hold against a compromised agent, run one agent or one
 session per Kata pod, so the separation is the VM boundary and the identity is

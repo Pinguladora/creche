@@ -48,6 +48,7 @@ has parsed and serialized again. A gap in `creche.seq` shows a removed line and 
 mismatched hash a changed one, but whoever can rewrite every checkpoint can
 rewrite the lines too: the chain proves integrity only as far as its checkpoints
 are kept out of reach. A stream removed whole leaves the others intact, so the
-chains cannot show that an archive holds every stream. That needs a record of the
-streams from elsewhere, such as the sandboxes the runtime started. The raw format
+chains cannot show that an archive holds every stream. That needs an independent
+inventory of the stream ids that should be there. A list of sandboxes is not
+enough, since a sandbox can have several streams. The raw format
 carries no sequence numbers or checkpoints.
