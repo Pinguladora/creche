@@ -15,10 +15,12 @@ creche-wire = { path = "crates/creche-wire" }
 anyhow = "1.0.104"
 aya = { version = "0.16.0", default-features = false }
 aya-obj = "0.6.0"
+base64ct = { version = "1.8.3", features = ["alloc"] }
 bytes = "1.12.1"
 h2 = "0.4.20"
 http = "1.5.0"
 lexopt = "0.3.2"
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8"] }
 prost = { version = "0.14.4", default-features = false, features = ["derive", "std"] }
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.1", default-features = false }
@@ -28,6 +30,8 @@ criterion = { version = "0.8.2", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
+x509-cert = { version = "0.3.0", default-features = false, features = ["pem"] }
+zeroize = "1.8.2"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false }
 zerocopy = { version = "0.8", features = ["derive"] }
