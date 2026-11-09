@@ -1,6 +1,6 @@
 name: Lint GitHub Actions
 
-# Security-audit and lint the workflows themselves with zizmor and actionlint,
+# Security-audit and lint the workflows themselves with jactionlint and zizmor,
 # run through mise (`mise run lint:gha`) so the pipeline stays portable. The same
 # tools run locally via the hk pre-push hook, so this is the enforcement path for
 # contributors who do not have the hooks installed.
@@ -9,11 +9,13 @@ on:
     branches: [main]
     paths:
       - ".github/zizmor.yml"
+      - ".github/jactionlint.yaml"
       - ".github/workflows/**.yml"
       - ".github/workflows/**.yaml"
   pull_request:
     paths:
       - ".github/zizmor.yml"
+      - ".github/jactionlint.yaml"
       - ".github/workflows/**.yml"
       - ".github/workflows/**.yaml"
 
@@ -50,7 +52,7 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          install_args: actionlint zizmor
+          install_args: jactionlint zizmor
       - name: Lint workflows
         run: mise run lint:gha
         env:

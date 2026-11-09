@@ -31,8 +31,8 @@ rust = { version = "1.99.1", mr_boxington = true, components = "clippy,rustfmt",
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.150"
 cargo-deny = "0.20.2"
 cocogitto = "7.0.0"
-actionlint = "1.7.12"
 zizmor = "1.30.1"
+jactionlint = { version = "2.4.0", workflow = "release.yaml" }
 
 [tasks.test]
 description = "Unit, property and doc tests, then again with debug assertions on a release build"
@@ -55,12 +55,13 @@ description = "Calculate the next versions from conventional commits, then tag a
 run = "cog bump --auto"
 
 [tasks."lint:gha"]
-# actionlint catches workflow syntax and expression errors; zizmor runs the
-# security static analysis. zizmor runs offline without a token (local) and does
-# the online audits when GITHUB_TOKEN is set (the lint-gha CI job passes it).
+# jactionlint catches workflow syntax and expression errors and applies the
+# security and policy rules of its default profile (.github/jactionlint.yaml).
+# zizmor runs its security static analysis alongside, offline without a token
+# (local) and with the online audits when GITHUB_TOKEN is set (the lint-gha job).
 run = [
-  "actionlint -color -shellcheck=",
+  "jactionlint --color --shellcheck=",
   "zizmor --config .github/zizmor.yml .github/workflows",
 ]
-description = "Lint and security-audit the GitHub Actions workflows (actionlint + zizmor)"
+description = "Lint and security-audit the GitHub Actions workflows (jactionlint + zizmor)"
 sources = [".github/workflows/**", ".github/zizmor.yml"]
