@@ -30,6 +30,7 @@ and other documents are welcome.
 | [0014 Checkpoints signed with a ratchet anchored to a SPIFFE SVID](0014-signed-checkpoints.md) | Accepted |
 | [0015 The observer guards its vsock port with BPF LSM](0015-observer-guards-its-port.md) | Accepted |
 | [0016 Streams are bound to the node their sandbox ran on](0016-streams-bound-to-their-node.md) | Accepted |
+| [0017 Agents label their cgroups with extended attributes](0017-agent-labels.md) | Accepted |
 
 ## Writing a record
 
