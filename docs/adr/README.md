@@ -21,6 +21,7 @@ links only to earlier records, never to later ones.
 | [0007 One wakeup per batch](0007-one-wakeup-per-batch.md) | Accepted |
 | [0008 OpenTelemetry JSON lines and raw frames](0008-output-formats.md) | Accepted |
 | [0009 The host attests the sandbox](0009-host-attests-the-sandbox.md) | Proposed |
+| [0010 The pod comes from the container runtime's bundle](0010-pod-from-the-runtime-bundle.md) | Proposed |
 
 ## Writing a record
 
