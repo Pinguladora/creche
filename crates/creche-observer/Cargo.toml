@@ -22,6 +22,7 @@ anyhow.workspace = true
 aya.workspace = true
 lexopt.workspace = true
 nix = { workspace = true, features = ["event", "feature", "resource", "socket", "time"] }
+rustix.workspace = true
 zerocopy.workspace = true
 
 [build-dependencies]
@@ -31,6 +32,7 @@ creche-wire.workspace = true
 aya-obj.workspace = true
 criterion.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "queue"

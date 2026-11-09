@@ -264,6 +264,8 @@ dependencies = [
  "lexopt",
  "nix",
  "proptest",
+ "rustix",
+ "tempfile",
  "zerocopy",
 ]
 
