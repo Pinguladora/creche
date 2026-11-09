@@ -30,6 +30,7 @@ creche-wire.workspace = true
 
 [dev-dependencies]
 aya-obj.workspace = true
+creche-wire = { workspace = true, features = ["sample"] }
 criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
