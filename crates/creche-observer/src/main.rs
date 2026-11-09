@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use creche_wire::{
     HEARTBEAT_LEN, HELLO_LEN, Header, HeartbeatRecord, HelloFlags, HelloRecord, Kind, VERSION,
+    peek_cgroup_id,
 };
 use nix::errno::Errno;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
@@ -26,6 +27,7 @@ use zerocopy::IntoBytes as _;
 
 use crate::bpf::{Probes, Stage};
 use crate::output::{Output, Target};
+use creche_observer::cgroups::{CGROUP_ROOT, Cgroups};
 use creche_observer::queue::RecordQueue;
 
 /// Heartbeat period, also the longest the observer sleeps when idle.
@@ -159,6 +161,7 @@ fn run(args: &Args) -> Result<()> {
         EpollEvent::new(EpollFlags::EPOLLIN, 0),
     )?;
     let mut queue = RecordQueue::new(QUEUE_CAPACITY);
+    let mut cgroups = Cgroups::new(CGROUP_ROOT);
     let mut output = Output::new(args.target);
     eprintln!("creche-observer: ready");
 
@@ -193,6 +196,14 @@ fn run(args: &Args) -> Result<()> {
         while let Some(record) = probes.events.next() {
             drained = true;
             if !args.discard {
+                // A cgroup the host has not heard of on this connection is
+                // described first, so its path and labels apply from the
+                // record that names it.
+                let described = peek_cgroup_id(&record)
+                    .and_then(|id| cgroups.describe(id, pid, metrics::boottime_ns()));
+                if let Some(description) = described {
+                    queue.push(description);
+                }
                 queue.push(&record);
             }
         }
@@ -217,9 +228,10 @@ fn run(args: &Args) -> Result<()> {
             queue.push(heartbeat.as_bytes());
         }
         let reconnected = output.send(&mut queue, || hello(probes.guarded()).as_bytes().to_vec());
-        // Records may have been lost, task records among them.
+        // Records may have been lost, task and cgroup records among them.
         if reconnected || queue.dropped_bytes() != dropped {
             dropped = queue.dropped_bytes();
+            cgroups.forget();
             probes.resync_tasks()?;
         }
     }
