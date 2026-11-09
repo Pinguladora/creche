@@ -14,9 +14,9 @@ the Kata proposal, could see what creche does but not why.
 
 Keep architecture decision records in `docs/adr`, one Markdown file per
 decision, numbered in order, in the format of [template.md](template.md). A
-change that makes a significant decision comes with its record. Records link
+change that makes a significant decision comes with its record. A record links
 only to earlier records, except that a superseded record's status names the
-record that replaced it.
+record that replaced it. Links to measurements and other documents are fine.
 
 A decision is significant when it is hard to reverse or shapes other code: the
 trust model, the wire format, the transport, kernel requirements, output

@@ -17,11 +17,13 @@ Each stream starts with a fresh P-256 key from the system's random source. The
 sink's X.509-SVID, from the SPIFFE Workload API on a local socket, signs the
 stream's first public key on its start line, next to the SVID chain. Each
 checkpoint is signed by the stream's current key and names the next key, derived
-from the current one and the checkpoint hash, and the current key is then
-erased.
+from the current one and the checkpoint hash by SHA-256, which cannot be run
+backwards, and the current key is then erased.
 
 A verifier checks the SVID against a SPIFFE trust bundle as of the stream's
-start, the first key's signature, then every checkpoint's signature in turn.
+start, that its SPIFFE ID is one of the sinks it expects, the first key's
+signature, then every checkpoint's signature in turn. Any workload in the trust
+domain has an SVID, so the expected sink IDs are required.
 
 ## Alternatives
 
@@ -41,7 +43,9 @@ start, the first key's signature, then every checkpoint's signature in turn.
 The sink holds no key of its own, and SPIRE attests and rotates its identity.
 Taking over the sink yields only the current stream keys, so checkpoints signed
 before are sealed. Lines after the last checkpoint, at most about a second of a
-stream, are not. Whoever steals an SVID while it is valid can fabricate whole new
-streams in an archive copy, which copies already exported elsewhere expose. Only
+stream, are not. Whoever steals an SVID key can fabricate whole new streams in an
+archive copy, backdated to any time the SVID was valid, even after it expired.
+Copies already exported elsewhere expose them, and a trusted timestamp, such as a
+transparency log entry, would bound them. Only
 P-256 SVIDs, SPIRE's default, are supported. A stream started before the agent
 handed over an SVID is not signed, and a verifier with a bundle reports it.

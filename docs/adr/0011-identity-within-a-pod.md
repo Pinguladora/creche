@@ -31,9 +31,11 @@ Every attribute belongs to one of three tiers, and its name says which.
 Per-agent identity inside one pod rests on tier 2. Each agent runs in its own
 cgroup, a delegated cgroup v2 subtree inside its container, under its own uid.
 Only that uid may write the `cgroup.procs` files of its subtree, and no agent may
-write those of a common ancestor, so no agent can move a process into another's
-cgroup. Each agent's files are closed to the other uids, by mode and ACL, or kept
-on a separate filesystem. creche reports the cgroup and uid on every event, and
+write those of a common ancestor. Moving a process needs write access to both the
+destination's and the common ancestor's `cgroup.procs`, so no agent can move a
+process into another's cgroup. Each agent's files are closed to the other uids,
+by mode and ACL, or kept on a separate filesystem, and no agent may gain a
+privilege that changes its uid, such as `CAP_SETUID` or a setuid binary. creche reports the cgroup and uid on every event, and
 maps a cgroup to an agent name only as a tier 3 claim.
 
 Where identity must hold against a compromised agent, run one agent or one
@@ -54,8 +56,9 @@ tier 1.
 
 Agent platforms get per-agent attribution by giving each agent a cgroup and a
 uid, which also limits what agents can do to each other. Shared uids or loose
-permissions weaken it: an agent able to write a sibling's or a common ancestor's
-`cgroup.procs` can move into the sibling's cgroup.
+permissions weaken it: an agent able to write both a sibling's and their common
+ancestor's `cgroup.procs` can move into the sibling's cgroup, and one able to
+change its uid can read the sibling's files.
 
 Tier 2 needs the observer to be the only sender. Any guest process that can open
 a vsock socket could connect to the observer's port and send records of its own,

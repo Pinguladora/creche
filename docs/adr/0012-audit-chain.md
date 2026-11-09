@@ -47,4 +47,7 @@ exact bytes the sink wrote, so it runs on archived output, not on lines a shippe
 has parsed and serialized again. A gap in `creche.seq` shows a removed line and a
 mismatched hash a changed one, but whoever can rewrite every checkpoint can
 rewrite the lines too: the chain proves integrity only as far as its checkpoints
-are kept out of reach. The raw format carries no sequence numbers or checkpoints.
+are kept out of reach. A stream removed whole leaves the others intact, so the
+chains cannot show that an archive holds every stream. That needs a record of the
+streams from elsewhere, such as the sandboxes the runtime started. The raw format
+carries no sequence numbers or checkpoints.

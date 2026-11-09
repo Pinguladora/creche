@@ -6,9 +6,10 @@ decision changes. A new record supersedes the old one, and the old one says so i
 its status, so the history of how creche evolved stays readable.
 
 Records 0001 to 0008 were written down on 2026-11-09, after the decisions were
-made. Their numbers follow the order in which the decisions were taken. A record
-links only to earlier records. The one exception is a superseded record's status,
-which names the record that replaced it.
+made. Their numbers follow the order in which the decisions were taken. Between
+records, a record links only to earlier ones. The one exception is a superseded
+record's status, which names the record that replaced it. Links to measurements
+and other documents are welcome.
 
 | Record | Status |
 |---|---|
