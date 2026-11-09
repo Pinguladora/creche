@@ -26,5 +26,8 @@ observer sleeps until its 5 s heartbeat.
 ## Consequences
 
 Exec, open and connect loops reached +6%, +8% and +4% at 20 ms with no drops.
-Latency for a burst is up to 20 ms. Heartbeats report ring buffer and queue drops,
+Latency for a burst is up to 20 ms, with one exception: a program decides on the
+wakeup before it writes its record, so if the observer drains and sleeps in
+between, that record and the ones after it wait for the next heartbeat, up to
+5 s. Heartbeats report ring buffer and queue drops,
 so silence can be told from blindness.

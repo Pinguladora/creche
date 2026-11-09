@@ -14,8 +14,9 @@ binary must be static, since the Kata guest image does not promise a libc.
 
 Keep the BPF programs in C with CO-RE (`vmlinux.h`, clang). Write the observer
 and the sink in Rust, and load the programs with aya, a pure Rust loader.
-`creche-wire` defines the record layout once, and `build.rs` checks the C structs
-against it.
+`creche-wire` defines the record layout in Rust and `wire.h` mirrors it in C.
+`build.rs` asserts that their struct sizes and field offsets agree. It does not
+compare field types.
 
 ## Alternatives
 

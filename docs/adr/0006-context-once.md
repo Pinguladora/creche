@@ -17,7 +17,7 @@ or changes, exec records carry the new context themselves, and forks hand the
 parent's context to the child on the host. In the kernel, a 4096-slot array
 indexed by pid remembers what was sent, with no allocation per process. An epoch
 counter makes every process resend after a reconnect or a drop. The sink keeps
-the context per pid and adds it to every JSON line.
+the context per pid and adds it to the JSON lines of that process.
 
 ## Alternatives
 
@@ -29,4 +29,6 @@ the context per pid and adds it to every JSON line.
 
 Bytes fell from 193 MB to 66 MB and observer CPU roughly halved. Two pids sharing a
 slot only cause an extra task record. The sink must bound its own per-stream
-state: it tracks at most 65536 processes.
+state: it tracks at most 65536 processes. Past that it forgets one, while the
+kernel's slot still says its context was sent, so that process's later events
+carry no context until it changes or the epoch moves.

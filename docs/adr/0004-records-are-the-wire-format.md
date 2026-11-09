@@ -28,6 +28,7 @@ A hello record carries the format version.
 ## Consequences
 
 The guest does almost no work per record. Changing a record means changing the C
-struct, the Rust struct and the version together, and the build fails if they
-disagree. The host decoder carries the whole burden of validation: it must accept
+struct, the Rust struct and the version together. The build fails if their sizes
+or field offsets disagree, but not on a change of field type of the same size or
+a forgotten version bump. The host decoder carries the whole burden of validation: it must accept
 any bytes without panicking, reading out of bounds or allocating without limit.

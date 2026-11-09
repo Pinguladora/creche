@@ -7,7 +7,8 @@ its status, so the history of how creche evolved stays readable.
 
 Records 0001 to 0008 were written down on 2026-11-09, after the decisions were
 made. Their numbers follow the order in which the decisions were taken. A record
-links only to earlier records, never to later ones.
+links only to earlier records. The one exception is a superseded record's status,
+which names the record that replaced it.
 
 | Record | Status |
 |---|---|
@@ -25,6 +26,7 @@ links only to earlier records, never to later ones.
 | [0011 Identity within a pod: cgroup and uid per agent](0011-identity-within-a-pod.md) | Proposed |
 | [0012 Numbered streams chained with SHA-256 checkpoints](0012-audit-chain.md) | Proposed |
 | [0013 OTLP export over gRPC with zstd, the line as the body](0013-otlp-export.md) | Proposed |
+| [0014 Checkpoints signed with a ratchet anchored to a SPIFFE SVID](0014-signed-checkpoints.md) | Proposed |
 
 ## Writing a record
 

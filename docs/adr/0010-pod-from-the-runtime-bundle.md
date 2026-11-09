@@ -19,8 +19,8 @@ directory only root can enter. It takes `io.kubernetes.cri.sandbox-name`,
 `-namespace` and `-uid` and adds them to every line as `k8s.pod.name`,
 `k8s.namespace.name` and `k8s.pod.uid`.
 
-The spec is used only when the bundle directory is private to root or the sink's
-own user, the spec is a regular file of at most 1 MiB, its
+The spec is used only when the bundle directory is owned by root and private to
+it, the spec is a root-owned regular file of at most 1 MiB, its
 `io.kubernetes.cri.container-type` is `sandbox` and its
 `io.kubernetes.cri.sandbox-id` is the attested id. Otherwise every line carries
 `creche.k8s.unresolved` with the reason, and nothing is guessed. The spec is read

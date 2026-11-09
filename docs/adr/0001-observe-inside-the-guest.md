@@ -16,15 +16,22 @@ See the motivation in [the Kata proposal](../kata-guest-ebpf-proposal.md).
 
 Observe with eBPF in the guest kernel, from a small daemon (`creche-observer`)
 started from the guest image before kata-agent, and decode on the host. The
-guest sends process execs, forks and exits, file writes and connects.
+guest sends process execs, forks and exits, opens of files for writing, and
+connects. It does not report each write, so writes through a descriptor opened
+before the observer started, or inherited, leave no file event.
 
 ## Alternatives
 
 - Host side tools: they cannot see into the VM.
-- A sidecar container: it lives in the same guest but in a pod's namespaces, and
-  without BTF and the JIT in the guest kernel nothing modern loads.
-- Auditd or ptrace in the guest: far more overhead per event and no kernel side
-  filtering.
+- A sidecar container: it lives in the same guest but in the pod's namespaces.
+  Tetragon there reported no events, and on Kata's default kernel, which has no
+  BTF, CO-RE programs cannot load. A privileged sidecar could still run simpler
+  kprobe programs, without the portability CO-RE gives and with privileges the
+  pod would have to grant.
+- Auditd in the guest: the kernel filters by rule, but formats every matching
+  event as a text record and sends it to a daemon, so each event costs a record
+  that repeats the process context.
+- Ptrace in the guest: it stops the traced process at every event.
 - Hypervisor introspection: tied to one VMM and to guest kernel internals, and
   it must reconstruct processes from memory.
 

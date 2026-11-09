@@ -11,8 +11,8 @@ workload controls and which may be absent or locked down.
 
 ## Decision
 
-The observer connects to vsock port 7000. Cloud Hypervisor and Firecracker use
-hybrid vsock: a guest connection to port P arrives on the host as a connection to
+The observer connects to vsock port 7000. Cloud Hypervisor uses hybrid vsock: a
+guest connection to port P arrives on the host as a connection to
 the unix socket `<sandbox dir>/clh.sock_P`. One host daemon, `creche-sink`,
 watches `/run/vc/vm` and listens in every sandbox directory, so the directory
 names the sandbox.
@@ -29,4 +29,6 @@ names the sandbox.
 No guest network configuration and no kata-agent changes. Each vsock packet is a
 VM exit (the virtio doorbell), so sends must be batched. The sandbox identity
 comes from which socket a connection arrives on, which the guest cannot choose.
-QEMU uses native vsock instead and would need its own listener.
+Firecracker uses hybrid vsock too, but Kata names its socket `kata.hvsock`, which
+the sink does not listen next to. QEMU uses native vsock instead. Both would need
+their own listener.

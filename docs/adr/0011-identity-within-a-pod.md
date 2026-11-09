@@ -22,17 +22,19 @@ Every attribute belongs to one of three tiers, and its name says which.
 1. Host attested: the sandbox id and the pod's name, namespace and uid. Only root
    on the host can forge them.
 2. Observed by the guest kernel: pid, process tree, uid, cgroup id and name, exec
-   path. Only root inside that VM can forge them.
+   path. They hold only while the observer is the one sending records, so only
+   what controls the guest kernel or the observer can forge them.
 3. Claimed by the workload: anything a process announces about itself. Reported
    under `creche.guest.*`, checked against the host where possible, as with the
    container a cgroup names.
 
 Per-agent identity inside one pod rests on tier 2. Each agent runs in its own
 cgroup, a delegated cgroup v2 subtree inside its container, under its own uid.
-The kernel keeps processes in their cgroup and the uid keeps one agent from
-moving its processes into another agent's cgroup or reading its files. creche
-reports the cgroup and uid on every event, and maps a cgroup to an agent name
-only as a tier 3 claim.
+Only that uid may write the `cgroup.procs` files of its subtree, and no agent may
+write those of a common ancestor, so no agent can move a process into another's
+cgroup. Each agent's files are closed to the other uids, by mode and ACL, or kept
+on a separate filesystem. creche reports the cgroup and uid on every event, and
+maps a cgroup to an agent name only as a tier 3 claim.
 
 Where identity must hold against a compromised agent, run one agent or one
 session per Kata pod, so the separation is the VM boundary and the identity is
@@ -51,8 +53,14 @@ tier 1.
 ## Consequences
 
 Agent platforms get per-agent attribution by giving each agent a cgroup and a
-uid, which also limits what agents can do to each other. Shared uids weaken it:
-an agent able to write to a sibling's `cgroup.procs` can move into it. Root in
-the guest can forge tiers 2 and 3, which is why strong separation means one agent
-per VM. Sessions multiplexed in one process are out of reach of kernel
+uid, which also limits what agents can do to each other. Shared uids or loose
+permissions weaken it: an agent able to write a sibling's or a common ancestor's
+`cgroup.procs` can move into the sibling's cgroup.
+
+Tier 2 needs the observer to be the only sender. Today any guest process that can
+open a vsock socket can connect to the observer's port and send records of its
+own, which the host cannot tell from the observer's. Until the observer refuses
+other processes that port, for example with a BPF LSM program, a workload in the
+pod can forge tier 2 fields. Root in the guest can forge tiers 2 and 3 anyway,
+which is why strong separation means one agent per VM. Sessions multiplexed in one process are out of reach of kernel
 observation.
