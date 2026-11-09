@@ -109,6 +109,7 @@ creche-sink                     # on the host, as root or the VMM's user: listen
 creche-observer                 # in the guest (systemd unit before kata-agent)
 creche-observer --stdout | creche-sink -f -    # local capture and decode
 creche-sink -o raw              # the records unchanged, in frames naming their sandbox
+creche-sink -b /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io   # k3s keeps containerd's state here
 creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
 ```
 
