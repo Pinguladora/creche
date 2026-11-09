@@ -141,6 +141,7 @@ creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
 creche-sink --verify out.jsonl  # check the audit chains in saved output
 creche-sink --spiffe-socket /run/spire/agent.sock   # sign every stream with the sink's SVID
 creche-sink --verify out.jsonl --bundle bundle.pem --spiffe-id spiffe://example.org/creche-sink
+creche-sink --verify out.jsonl --bundle bundle.pem --spiffe-id 'spiffe://example.org/creche-sink/{node}' --nodes nodes.txt
 creche-sink --otlp http://127.0.0.1:4317 > archive.jsonl   # export to a node collector, keep an archive
 ```
 
@@ -193,6 +194,12 @@ the pipelines they already feed.
   every stream is signed by one of the given sink SPIFFE IDs, with an SVID that
   chained to the trust bundle at the stream's start. The IDs are required: any
   other workload in the trust domain has an SVID too.
+  With `--nodes FILE`, each stream must also be signed by the sink on the node
+  its sandbox ran on: every `--spiffe-id` holds `{node}`, and FILE has lines of
+  `<pod uid or sandbox id> <node>` from the cluster's pod history, for instance
+  `kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.uid} {.spec.nodeName}{"\n"}{end}'`
+  for the pods still around. Register each node's sink with that node's SPIRE
+  agent as parent, so no other node can be issued its ID.
 - **OpenTelemetry logs** (`--otlp URL`, with JSON output): the same lines,
   also exported to a collector as OTLP over gRPC (`--otlp-protocol grpc`, the
   default, port 4317) or OTLP/HTTP (`--otlp-protocol http`, port 4318), protobuf

@@ -304,6 +304,10 @@ struct Entry {
     key: Option<String>,
     #[serde(rename = "creche.audit.key_sig")]
     key_sig: Option<String>,
+    #[serde(rename = "creche.sandbox.id")]
+    sandbox: Option<String>,
+    #[serde(rename = "k8s.pod.uid")]
+    pod_uid: Option<String>,
 }
 
 /// A checkpoint as read back. It orders by place first, then by every
@@ -325,6 +329,8 @@ struct Start {
     svid: String,
     key: String,
     key_sig: String,
+    sandbox: Option<String>,
+    pod_uid: Option<String>,
 }
 
 /// What [`verify`] found in one stream.
@@ -346,6 +352,9 @@ pub struct StreamReport {
     pub signer: Option<String>,
     /// Whether the signer's SVID was checked against a trust bundle.
     pub trusted: bool,
+    /// The node the stream's sandbox ran on, when the signer was checked
+    /// against it.
+    pub node: Option<String>,
     /// Everything that does not add up. Empty when the stream is intact.
     pub problems: Vec<String>,
 }
@@ -373,10 +382,137 @@ impl Report {
 #[derive(Clone, Debug)]
 pub struct Trust {
     /// The SPIFFE trust bundle SVIDs must chain to.
-    pub bundle: TrustBundle,
+    bundle: TrustBundle,
     /// The SPIFFE IDs of the sinks expected to sign. Any other workload with an
     /// SVID from the same trust domain could otherwise sign a made-up stream.
-    pub sinks: Vec<String>,
+    /// With `nodes`, each holds [`NODE`] in place of the node's name.
+    sinks: Vec<String>,
+    nodes: Option<Nodes>,
+}
+
+/// What stands for the node's name in a sink's SPIFFE ID, once streams are
+/// bound to their nodes.
+pub const NODE: &str = "{node}";
+
+impl Trust {
+    /// Streams must be signed by one of `sinks`, with an SVID that chains to
+    /// `bundle`. With `nodes`, every sink ID holds [`NODE`], and a stream must
+    /// be signed by the sink on the node its sandbox ran on. Otherwise any
+    /// authorised sink could sign a stream for a sandbox on another node.
+    ///
+    /// # Errors
+    ///
+    /// When there are no sinks, or when some hold [`NODE`] and there are no
+    /// `nodes`, or the other way round.
+    pub fn new(
+        bundle: TrustBundle,
+        sinks: Vec<String>,
+        nodes: Option<Nodes>,
+    ) -> Result<Self, String> {
+        if sinks.is_empty() {
+            return Err("no sink may sign".into());
+        }
+        let bound = nodes.is_some();
+        if let Some(sink) = sinks.iter().find(|s| s.contains(NODE) != bound) {
+            return Err(if bound {
+                format!("{sink} does not name the node with {NODE}")
+            } else {
+                format!("{sink} names a node, but no nodes are known")
+            });
+        }
+        Ok(Self {
+            bundle,
+            sinks,
+            nodes,
+        })
+    }
+
+    /// Whether `id` may sign the stream `start` begins. With nodes, the node
+    /// that decided it.
+    fn allows(&self, id: &str, start: &Start) -> Result<Option<String>, String> {
+        let Some(nodes) = &self.nodes else {
+            return if self.sinks.iter().any(|s| s == id) {
+                Ok(None)
+            } else {
+                Err(format!("signed by {id}, which is not an expected sink"))
+            };
+        };
+        let node = nodes.node_of(start.pod_uid.as_deref(), start.sandbox.as_deref())?;
+        if self.sinks.iter().any(|s| s.replace(NODE, node) == id) {
+            Ok(Some(node.to_owned()))
+        } else {
+            Err(format!(
+                "signed by {id}, which is not the sink on node {node}"
+            ))
+        }
+    }
+}
+
+/// Which node each sandbox ran on, by pod uid or sandbox id, as the cluster's
+/// pod history tells.
+#[derive(Clone, Debug, Default)]
+pub struct Nodes(BTreeMap<String, String>);
+
+impl Nodes {
+    /// Reads lines of `<pod uid or sandbox id> <node>`. Blank lines, `#`
+    /// comments and pods with no node, which never ran, are skipped.
+    ///
+    /// # Errors
+    ///
+    /// On a line with more than two fields, a node name that is not a DNS
+    /// subdomain, or one pod on two nodes.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut nodes = BTreeMap::new();
+        for (number, line) in (1_u32..).zip(text.lines()) {
+            let line = line.split('#').next().unwrap_or_default();
+            let mut fields = line.split_whitespace();
+            let (Some(key), Some(node)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            if fields.next().is_some() {
+                return Err(format!(
+                    "line {number}: expected <pod uid or sandbox id> <node>"
+                ));
+            }
+            if !is_node_name(node) {
+                return Err(format!("line {number}: {node:?} is not a node name"));
+            }
+            match nodes.insert(key.to_owned(), node.to_owned()) {
+                Some(other) if other != node => {
+                    return Err(format!(
+                        "line {number}: {key} is on both {other} and {node}"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(Self(nodes))
+    }
+
+    /// The node of a sandbox, by its pod uid first, then its sandbox id.
+    fn node_of(&self, pod_uid: Option<&str>, sandbox: Option<&str>) -> Result<&str, String> {
+        [pod_uid, sandbox]
+            .into_iter()
+            .flatten()
+            .find_map(|key| self.0.get(key))
+            .map(String::as_str)
+            .ok_or_else(|| match (pod_uid, sandbox) {
+                (Some(uid), _) => format!("no node is known for pod {uid}"),
+                (None, Some(id)) => format!("no node is known for sandbox {id}"),
+                (None, None) => "the stream names no sandbox".to_owned(),
+            })
+    }
+}
+
+/// Whether `name` is a Kubernetes node name: a DNS subdomain, lowercase
+/// letters, digits, `-` and `.`, starting and ending with a letter or digit.
+fn is_node_name(name: &str) -> bool {
+    let alnum = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let bytes = name.as_bytes();
+    (1..=253).contains(&bytes.len())
+        && bytes.first().is_some_and(alnum)
+        && bytes.last().is_some_and(alnum)
+        && bytes.iter().all(|b| alnum(b) || *b == b'-' || *b == b'.')
 }
 
 /// Checks the audit chains in `output`, the bytes the sink wrote. Lines of
@@ -421,6 +557,8 @@ pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
                             svid,
                             key,
                             key_sig,
+                            sandbox: entry.sandbox,
+                            pod_uid: entry.pod_uid,
                         },
                     );
                 }
@@ -457,9 +595,10 @@ pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
         let mut stream_checkpoints = checkpoints.remove(stream).unwrap_or_default();
         let key = match (starts.remove(stream), trust) {
             (Some(start), _) => match first_key(stream, &start, trust) {
-                Ok((signer, key)) => {
+                Ok((signer, node, key)) => {
                     status.signer = Some(signer);
                     status.trusted = trust.is_some();
+                    status.node = node;
                     Some(key)
                 }
                 Err(problem) => {
@@ -484,27 +623,27 @@ pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
     report
 }
 
-/// The SPIFFE ID and the first key of a signed stream, once the SVID's
-/// signature over that key holds, and with a `bundle`, once the SVID chains to
-/// it at the stream's start.
+/// The SPIFFE ID, the node it was checked against and the first key of a
+/// signed stream, once the SVID's signature over that key holds, and with
+/// `trust`, once the SVID chains to its bundle at the stream's start and
+/// belongs to a sink it allows.
 fn first_key(
     stream: &str,
     start: &Start,
     trust: Option<&Trust>,
-) -> Result<(String, VerifyingKey), String> {
+) -> Result<(String, Option<String>, VerifyingKey), String> {
     let chain = Base64::decode_vec(&start.svid).map_err(|_| "the SVID is not base64".to_owned())?;
-    let (id, svid_key) = match trust {
-        Some(trust) => {
-            let (id, key) = trust
-                .bundle
-                .verify(&chain, start.observed_ns / 1_000_000_000)
-                .map_err(|e| format!("the SVID is not trusted: {e}"))?;
-            if !trust.sinks.contains(&id) {
-                return Err(format!("signed by {id}, which is not an expected sink"));
-            }
-            (Some(id), key)
-        }
-        None => spiffe::leaf_key(&chain).map_err(|e| format!("the SVID does not parse: {e}"))?,
+    let (id, node, svid_key) = if let Some(trust) = trust {
+        let (id, key) = trust
+            .bundle
+            .verify(&chain, start.observed_ns / 1_000_000_000)
+            .map_err(|e| format!("the SVID is not trusted: {e}"))?;
+        let node = trust.allows(&id, start)?;
+        (Some(id), node, key)
+    } else {
+        let (id, key) =
+            spiffe::leaf_key(&chain).map_err(|e| format!("the SVID does not parse: {e}"))?;
+        (id, None, key)
     };
     if id.as_deref() != Some(start.spiffe_id.as_str()) {
         return Err("the SVID does not carry the stream's SPIFFE ID".into());
@@ -514,7 +653,7 @@ fn first_key(
         return Err("the SVID did not sign the stream's key".into());
     }
     let key = parse_key(&start.key).ok_or("the stream's key is not a P-256 key")?;
-    Ok((start.spiffe_id.clone(), key))
+    Ok((start.spiffe_id.clone(), node, key))
 }
 
 /// Checks one stream's lines against its checkpoints, and in a signed stream,
@@ -890,12 +1029,20 @@ mod tests {
         Svid::from_der("spiffe://creche.test/sink", chain, key).unwrap()
     }
 
+    fn fixture_bundle() -> TrustBundle {
+        TrustBundle::from_pem(include_bytes!("../tests/fixtures/spiffe/bundle.pem")).unwrap()
+    }
+
     fn trust(sinks: &[&str]) -> Trust {
-        Trust {
-            bundle: TrustBundle::from_pem(include_bytes!("../tests/fixtures/spiffe/bundle.pem"))
-                .unwrap(),
-            sinks: sinks.iter().map(|s| (*s).to_owned()).collect(),
-        }
+        let sinks = sinks.iter().map(|s| (*s).to_owned()).collect();
+        Trust::new(fixture_bundle(), sinks, None).unwrap()
+    }
+
+    /// Sinks named `spiffe://creche.test/{node}`, so the fixture SVID is the
+    /// sink on node `sink`.
+    fn on_nodes(nodes: &str) -> Trust {
+        let sinks = vec![format!("spiffe://creche.test/{NODE}")];
+        Trust::new(fixture_bundle(), sinks, Some(Nodes::parse(nodes).unwrap())).unwrap()
     }
 
     fn bundle() -> Trust {
@@ -1067,6 +1214,96 @@ mod tests {
             ])),
         );
         assert!(report.intact());
+    }
+
+    #[test]
+    fn a_stream_must_be_signed_by_the_sink_on_its_node() {
+        let (out, _) = signed_stream(10, &sink_svid());
+        // The fixture stream's sandbox is "sb", with no pod.
+        let report = verify(&out, Some(&on_nodes("sb sink\n")));
+        assert!(report.intact(), "{report:?}");
+        assert_eq!(report.streams["s1"].node.as_deref(), Some("sink"));
+
+        let report = verify(&out, Some(&on_nodes("sb other\nsb2 sink\n")));
+        assert_eq!(
+            report.streams["s1"].problems,
+            ["signed by spiffe://creche.test/sink, which is not the sink on node other"]
+        );
+        let report = verify(&out, Some(&on_nodes("sb2 sink\n")));
+        assert_eq!(
+            report.streams["s1"].problems,
+            ["no node is known for sandbox sb"]
+        );
+    }
+
+    #[test]
+    fn a_pod_uid_decides_before_the_sandbox_id() {
+        let start = |pod_uid: Option<&str>| Start {
+            observed_ns: 0,
+            spiffe_id: String::new(),
+            svid: String::new(),
+            key: String::new(),
+            key_sig: String::new(),
+            sandbox: Some("sb".into()),
+            pod_uid: pod_uid.map(Into::into),
+        };
+        let trust = on_nodes("sb other\nuid-1 sink\n");
+        let id = "spiffe://creche.test/sink";
+        assert_eq!(
+            trust.allows(id, &start(Some("uid-1"))),
+            Ok(Some("sink".into()))
+        );
+        // A pod missing from the history falls back to the sandbox id.
+        assert!(trust.allows(id, &start(Some("uid-2"))).is_err());
+        assert_eq!(
+            trust.allows("spiffe://creche.test/other", &start(Some("uid-2"))),
+            Ok(Some("other".into()))
+        );
+        let mut nameless = start(None);
+        nameless.sandbox = None;
+        assert_eq!(
+            trust.allows(id, &nameless),
+            Err("the stream names no sandbox".into())
+        );
+    }
+
+    #[test]
+    fn node_files_are_read_strictly() {
+        let nodes =
+            Nodes::parse("# uid node\n\nuid-1 node-a  # first\npending\nuid-1 node-a\n").unwrap();
+        assert_eq!(nodes.0.len(), 1);
+        assert_eq!(nodes.node_of(Some("uid-1"), None), Ok("node-a"));
+        for (text, problem) in [
+            (
+                "uid-1 a b",
+                "line 1: expected <pod uid or sandbox id> <node>",
+            ),
+            ("uid-1 Node", "line 1: \"Node\" is not a node name"),
+            ("uid-1 a/b", "line 1: \"a/b\" is not a node name"),
+            ("uid-1 -a", "line 1: \"-a\" is not a node name"),
+            ("uid-1 a\nuid-1 b", "line 2: uid-1 is on both a and b"),
+        ] {
+            assert_eq!(Nodes::parse(text).unwrap_err(), problem, "{text}");
+        }
+        assert!(is_node_name("kairos-e694.lab"));
+        assert!(!is_node_name(&"a".repeat(254)));
+    }
+
+    #[test]
+    fn node_templates_go_with_a_node_file() {
+        let template = vec![format!("spiffe://creche.test/{NODE}")];
+        let plain = vec!["spiffe://creche.test/sink".to_owned()];
+        assert!(Trust::new(fixture_bundle(), template.clone(), Some(Nodes::default())).is_ok());
+        assert!(Trust::new(fixture_bundle(), plain.clone(), None).is_ok());
+        assert_eq!(
+            Trust::new(fixture_bundle(), template, None).unwrap_err(),
+            "spiffe://creche.test/{node} names a node, but no nodes are known"
+        );
+        assert_eq!(
+            Trust::new(fixture_bundle(), plain, Some(Nodes::default())).unwrap_err(),
+            "spiffe://creche.test/sink does not name the node with {node}"
+        );
+        assert!(Trust::new(fixture_bundle(), Vec::new(), None).is_err());
     }
 
     #[test]
