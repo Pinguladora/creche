@@ -17,6 +17,9 @@
 #define S_IFCHR 0020000
 #define S_IFSOCK 0140000
 #define SCRATCH_LEN 1024
+#define AF_VSOCK 40
+#define VMADDR_CID_HOST 2
+#define EPERM 1
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
@@ -30,6 +33,30 @@ const volatile __u64 dedup_window_ns = 1000000000ULL;
 #define STAGE_ATTACH 1
 #define STAGE_LOGIC 2
 const volatile __u8 stage = STAGE_FULL;
+
+/* The observer's process and the host vsock port it sends on, set by the loader
+ * before load. guard_connect lets no other process connect to the host on that
+ * port, so a workload in the guest cannot send records the host would take for
+ * the observer's. */
+const volatile __u32 guard_tgid = 0;
+const volatile __u32 guard_port = 0;
+
+/* Connects to the guarded port the guard has seen, allowed or not. A non-zero
+ * count after the observer's own connect proves BPF LSM is running the guard. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} guard_seen SEC(".maps");
+
+/* struct sockaddr_vm, a stable UAPI layout (linux/vm_sockets.h). */
+struct vsock_addr {
+	__u16 family;
+	__u16 reserved;
+	__u32 port;
+	__u32 cid;
+};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -212,7 +239,9 @@ static __always_inline struct sent_slot *sync_task(void)
 	n = bpf_probe_read_kernel_str(e->cgroup, sizeof(e->cgroup), t->cgroups->dfl_cgrp->kn->name);
 	if (n < 0)
 		n = 0;
-	if (output(e, __builtin_offsetof(struct ev_task, cgroup) + (n & (CGROUP_LEN - 1))))
+	if (n > CGROUP_LEN)
+		n = CGROUP_LEN;
+	if (output(e, __builtin_offsetof(struct ev_task, cgroup) + n))
 		return 0;
 	s->tgid = tgid;
 	s->epoch = *ep;
@@ -422,6 +451,34 @@ static __always_inline int duplicate(struct file *f)
 	return 0;
 }
 
+/* A BPF LSM hook: its arguments are those of security_socket_connect(sock,
+ * address, addrlen), then the verdict of the LSMs before it. */
+SEC("lsm/socket_connect")
+int guard_connect(__u64 *ctx)
+{
+	void *address = (void *)ctx[1];
+	int addrlen = (int)ctx[2];
+	int verdict = (int)ctx[3];
+	struct vsock_addr vm = {};
+	__u32 zero = 0;
+	__u64 *seen;
+
+	if (verdict)
+		return verdict;
+	if (!guard_tgid || addrlen < (int)sizeof(vm))
+		return 0;
+	if (bpf_probe_read_kernel(&vm, sizeof(vm), address))
+		return 0;
+	if (vm.family != AF_VSOCK || vm.cid != VMADDR_CID_HOST || vm.port != guard_port)
+		return 0;
+	seen = bpf_map_lookup_elem(&guard_seen, &zero);
+	if (seen)
+		__sync_fetch_and_add(seen, 1);
+	if ((__u32)(bpf_get_current_pid_tgid() >> 32) == guard_tgid)
+		return 0;
+	return -EPERM;
+}
+
 SEC("fentry/security_file_open")
 int on_open(__u64 *ctx)
 {
@@ -443,7 +500,9 @@ int on_open(__u64 *ctx)
 	n = bpf_d_path(&f->f_path, e->path, sizeof(e->path));
 	if (n < 0)
 		n = 0;
+	if (n > PATH_LEN)
+		n = PATH_LEN;
 	e->path_len = n;
-	output(e, __builtin_offsetof(struct ev_open, path) + (n & (PATH_LEN - 1)));
+	output(e, __builtin_offsetof(struct ev_open, path) + n);
 	return 0;
 }
