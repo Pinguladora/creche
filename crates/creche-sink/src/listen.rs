@@ -4,18 +4,23 @@
 //! to the unix socket `<sandbox dir>/clh.sock_P`. Sandbox directories appear
 //! and disappear under `/run/vc/vm` as pods start and stop, so they are rescanned
 //! periodically and each gets its own listener.
+//!
+//! Only the sandbox's own VMM may connect (see [`crate::peer`]), so a sandbox id
+//! in the output is attested by the host.
 
 use std::collections::HashMap;
 use std::io;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
+use crate::peer::{self, Refusal};
 use crate::stream::{Format, StreamDecoder};
 
 /// How often sandbox directories are rescanned.
@@ -24,6 +29,11 @@ const SCAN_INTERVAL: Duration = Duration::from_millis(200);
 const OUTPUT_BACKLOG: usize = 1024;
 /// Read size per connection.
 const READ_CHUNK: usize = 65_536; // 64 KiB
+/// Open connections per sandbox. An observer keeps one, a restarted observer
+/// briefly two. Each connection costs a decoder and a task cache.
+const MAX_CONNECTIONS: usize = 4;
+/// Longest sandbox id. containerd ids are at most 76 characters.
+const MAX_ID_LEN: usize = 76;
 
 /// Listens for every sandbox under `dir` on vsock `port`, writing `format` to
 /// stdout, until stdout fails.
@@ -83,43 +93,105 @@ async fn scan(
     }
     listeners.retain(|name, _| present.contains(name));
     for name in present {
-        if listeners.contains_key(&name) {
+        // Ids end up in paths and in every output line.
+        if listeners.contains_key(&name) || !valid_id(&name) {
             continue;
         }
         let sandbox = dir.join(&name);
+        let vsock = sandbox.join("clh.sock");
         // Only once the VMM has created its vsock socket.
-        if !tokio::fs::try_exists(sandbox.join("clh.sock"))
-            .await
-            .unwrap_or(false)
-        {
+        let Ok(vmm) = tokio::fs::symlink_metadata(&vsock).await else {
             continue;
-        }
+        };
         let socket = sandbox.join(format!("clh.sock_{port}"));
         let _ = tokio::fs::remove_file(&socket).await;
-        match UnixListener::bind(&socket) {
-            Ok(listener) => {
-                eprintln!("creche-sink: listening for sandbox {}", short(&name));
-                let task = tokio::spawn(accept(
-                    listener,
-                    Arc::from(name.as_str()),
-                    format,
-                    tx.clone(),
-                ));
-                listeners.insert(name, Listener { task, socket });
+        let listener = match UnixListener::bind(&socket) {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!("creche-sink: cannot listen on {}: {e}", socket.display());
+                continue;
             }
-            Err(e) => eprintln!("creche-sink: cannot listen on {}: {e}", socket.display()),
+        };
+        if let Err(e) = restrict(&socket, &vmm) {
+            eprintln!("creche-sink: cannot restrict {}: {e}", socket.display());
         }
+        eprintln!("creche-sink: listening for sandbox {}", short(&name));
+        let sandbox = Sandbox {
+            id: Arc::from(name.as_str()),
+            vsock: Arc::from(vsock),
+        };
+        let task = tokio::spawn(accept(listener, sandbox, format, tx.clone()));
+        listeners.insert(name, Listener { task, socket });
     }
+}
+
+/// Whether `id` is a containerd identifier: ASCII letters and digits in
+/// groups joined by single `.`, `_` or `-`, at most [`MAX_ID_LEN`] long.
+fn valid_id(id: &str) -> bool {
+    id.len() <= MAX_ID_LEN
+        && id
+            .split(['.', '_', '-'])
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// Lets only the VMM's user connect to `socket`. The peer check refuses other
+/// processes anyway; this keeps them from getting that far.
+fn restrict(socket: &Path, vmm: &std::fs::Metadata) -> io::Result<()> {
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    std::os::unix::fs::chown(socket, Some(vmm.uid()), Some(vmm.gid()))
+}
+
+/// A sandbox as its listener knows it.
+#[derive(Clone)]
+struct Sandbox {
+    /// The sandbox directory's name.
+    id: Arc<str>,
+    /// Its VMM's listening vsock socket.
+    vsock: Arc<Path>,
 }
 
 async fn accept(
     listener: UnixListener,
-    sandbox: Arc<str>,
+    sandbox: Sandbox,
     format: Format,
     tx: mpsc::Sender<Vec<u8>>,
 ) {
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(receive(stream, Arc::clone(&sandbox), format, tx.clone()));
+        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+            eprintln!(
+                "creche-sink: refusing a connection to {}: {MAX_CONNECTIONS} already open",
+                short(&sandbox.id)
+            );
+            continue;
+        };
+        tokio::spawn(admit(stream, sandbox.clone(), format, tx.clone(), permit));
+    }
+}
+
+/// Receives from `stream` once its peer has proven to be the sandbox's VMM.
+async fn admit(
+    stream: UnixStream,
+    sandbox: Sandbox,
+    format: Format,
+    tx: mpsc::Sender<Vec<u8>>,
+    _permit: OwnedSemaphorePermit,
+) {
+    let verdict = match stream.peer_cred() {
+        Ok(cred) => {
+            let vsock = Arc::clone(&sandbox.vsock);
+            tokio::task::spawn_blocking(move || peer::check(cred.pid(), cred.uid(), &vsock))
+                .await
+                .unwrap_or(Err(Refusal::Io(io::ErrorKind::Other)))
+        }
+        Err(e) => Err(Refusal::from(e)),
+    };
+    match verdict {
+        Ok(()) => receive(stream, sandbox.id, format, tx).await,
+        Err(refusal) => eprintln!(
+            "creche-sink: refusing a connection to {}: {refusal}",
+            short(&sandbox.id)
+        ),
     }
 }
 
@@ -208,6 +280,52 @@ mod tests {
         }
     }
 
+    /// Listens on the sandbox's vsock socket the way its VMM would, which makes
+    /// this test process the VMM the sink accepts connections from.
+    fn vmm(sandbox: &Path) -> std::os::unix::net::UnixListener {
+        std::os::unix::net::UnixListener::bind(sandbox.join("clh.sock")).unwrap()
+    }
+
+    /// One listening sandbox under a fresh directory, served by `vmm` or not.
+    async fn listening(
+        serve: bool,
+    ) -> (
+        tempfile::TempDir,
+        Option<std::os::unix::net::UnixListener>,
+        HashMap<String, Listener>,
+        mpsc::Receiver<Vec<u8>>,
+    ) {
+        let tmp = test_dir();
+        let sandbox = tmp.path().join("0123456789abcdef");
+        tokio::fs::create_dir_all(&sandbox).await.unwrap();
+        let vmm = if serve {
+            Some(vmm(&sandbox))
+        } else {
+            tokio::fs::write(sandbox.join("clh.sock"), b"")
+                .await
+                .unwrap();
+            None
+        };
+        let (tx, rx) = mpsc::channel(8);
+        let mut listeners = HashMap::new();
+        scan(tmp.path(), 7000, Format::Json, &mut listeners, &tx).await;
+        assert_eq!(listeners.len(), 1);
+        (tmp, vmm, listeners, rx)
+    }
+
+    /// Connects to the sandbox's port 7000 socket.
+    async fn connect(tmp: &tempfile::TempDir) -> UnixStream {
+        UnixStream::connect(tmp.path().join("0123456789abcdef/clh.sock_7000"))
+            .await
+            .unwrap()
+    }
+
+    /// Whether the sink closed `stream` without sending anything.
+    async fn closed(stream: &mut UnixStream) -> bool {
+        let mut buf = [0; 1];
+        matches!(within(stream.read(&mut buf)).await, Ok(0) | Err(_))
+    }
+
     async fn read_line(out: &mut (impl AsyncRead + Unpin)) -> serde_json::Value {
         let mut buf = vec![0; 4096];
         let n = within(out.read(&mut buf)).await.unwrap();
@@ -227,11 +345,14 @@ mod tests {
             scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
             assert!(listeners.is_empty(), "no clh.sock yet");
 
-            tokio::fs::write(sandbox.join("clh.sock"), b"")
-                .await
-                .unwrap();
+            let _vmm = vmm(&sandbox);
             scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
             assert_eq!(listeners.len(), 1);
+            let mode = std::fs::metadata(sandbox.join("clh.sock_7000"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
 
             let mut guest = UnixStream::connect(sandbox.join("clh.sock_7000"))
                 .await
@@ -255,9 +376,7 @@ mod tests {
             let dir = tmp.path().to_path_buf();
             let sandbox = dir.join("fedcba9876543210");
             tokio::fs::create_dir_all(&sandbox).await.unwrap();
-            tokio::fs::write(sandbox.join("clh.sock"), b"")
-                .await
-                .unwrap();
+            let _vmm = vmm(&sandbox);
             let (out, mut reader) = tokio::io::duplex(64 * 1024);
             let server = tokio::spawn(run_with(dir.clone(), 7001, Format::Json, out));
 
@@ -308,6 +427,88 @@ mod tests {
                 socket: socket.clone(),
             });
             assert!(!socket.exists());
+        });
+    }
+
+    #[test]
+    fn only_the_sandbox_vmm_may_connect() {
+        runtime().block_on(async {
+            // The vsock socket exists, but no process serves it: whoever
+            // connects is not the VMM.
+            let (tmp, _vmm, _listeners, mut rx) = listening(false).await;
+            let mut intruder = connect(&tmp).await;
+            intruder.write_all(heartbeat().as_bytes()).await.unwrap();
+            assert!(closed(&mut intruder).await);
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn a_sandbox_takes_a_limited_number_of_connections() {
+        runtime().block_on(async {
+            let (tmp, _vmm, _listeners, mut rx) = listening(true).await;
+            let mut open = Vec::new();
+            for _ in 0..MAX_CONNECTIONS {
+                let mut guest = connect(&tmp).await;
+                guest.write_all(heartbeat().as_bytes()).await.unwrap();
+                within(rx.recv()).await.unwrap();
+                open.push(guest);
+            }
+            let mut extra = connect(&tmp).await;
+            assert!(closed(&mut extra).await);
+
+            // Closing one makes room again.
+            drop(open.pop());
+            let mut guest = within(async {
+                loop {
+                    let mut guest = connect(&tmp).await;
+                    guest.write_all(heartbeat().as_bytes()).await.unwrap();
+                    if let Ok(Some(_)) =
+                        tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+                    {
+                        break guest;
+                    }
+                }
+            })
+            .await;
+            guest.write_all(heartbeat().as_bytes()).await.unwrap();
+            within(rx.recv()).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn sandbox_ids_must_be_containerd_identifiers() {
+        for id in [
+            "0123456789abcdef",
+            "a",
+            "pod-1.x_y",
+            &"a".repeat(MAX_ID_LEN),
+        ] {
+            assert!(valid_id(id), "{id}");
+        }
+        for id in [
+            "",
+            ".",
+            "..",
+            "-a",
+            "a-",
+            "a--b",
+            "a b",
+            "a\nb",
+            "caf\u{e9}",
+            &"a".repeat(MAX_ID_LEN + 1),
+        ] {
+            assert!(!valid_id(id), "{id:?}");
+        }
+        runtime().block_on(async {
+            let tmp = test_dir();
+            let sandbox = tmp.path().join("not valid");
+            tokio::fs::create_dir_all(&sandbox).await.unwrap();
+            let _vmm = vmm(&sandbox);
+            let (tx, _rx) = mpsc::channel(8);
+            let mut listeners = HashMap::new();
+            scan(tmp.path(), 7000, Format::Json, &mut listeners, &tx).await;
+            assert!(listeners.is_empty());
         });
     }
 

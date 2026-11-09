@@ -48,6 +48,12 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   without BPF LSM still work, reported as unguarded.
 - **Whole records only.** The forwarding queue is bounded and never splits a record
   across connections. Heartbeats report drops so silence can be told from blindness.
+- **The host attests the sandbox.** Each sandbox's socket is mode 0600, owned by
+  its VMM's user, and the sink accepts only the process holding that sandbox's
+  listening vsock socket, checked through the peer's credentials and `/proc`.
+  The sandbox id on every line comes from the host, never from the guest. What
+  the guest reports inside the stream is the guest's claim. Sandbox ids must be
+  containerd identifiers, and each sandbox gets at most 4 connections.
 - **Layout guard.** `build.rs` generates C static assertions from `creche-wire`'s
   layout, so a wire struct mismatch between C and Rust fails the build.
 
@@ -115,7 +121,7 @@ hk check           # all linters (fmt, clippy, cargo-deny, YAML, Actions, ...)
 ## Running
 
 ```sh
-creche-sink                     # on the host: listens for every sandbox under /run/vc/vm
+creche-sink                     # on the host, as root or the VMM's user: listens for every sandbox under /run/vc/vm
 creche-observer                 # in the guest (systemd unit before kata-agent)
 creche-observer --stdout | creche-sink -f -    # local capture and decode
 creche-sink -o raw              # the records unchanged, in frames naming their sandbox

@@ -7,5 +7,6 @@
 
 pub mod json;
 pub mod listen;
+pub mod peer;
 pub mod stream;
 pub mod tasks;
