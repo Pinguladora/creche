@@ -1004,13 +1004,15 @@ mod tests {
                 include_bytes!("../tests/fixtures/spiffe/sink.key.der"),
             )
             .unwrap();
-            let bundle = crate::audit::Trust {
-                bundle: spiffe::TrustBundle::from_pem(include_bytes!(
+            let bundle = crate::audit::Trust::new(
+                spiffe::TrustBundle::from_pem(include_bytes!(
                     "../tests/fixtures/spiffe/bundle.pem"
                 ))
                 .unwrap(),
-                sinks: vec!["spiffe://creche.test/sink".to_owned()],
-            };
+                vec!["spiffe://creche.test/sink".to_owned()],
+                None,
+            )
+            .unwrap();
             let signed = one_stream(Signing::With(Arc::new(svid))).await;
             // The fixtures are valid from 2026, so this holds while the clock does.
             let report = crate::audit::verify(&signed, Some(&bundle));
