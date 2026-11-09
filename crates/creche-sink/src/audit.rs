@@ -351,6 +351,8 @@ pub struct StreamReport {
     /// A retry after a lost response delivers lines twice, which is no sign of
     /// tampering.
     pub duplicates: u64,
+    /// Whether the stream starts with a signature, accepted or not.
+    pub signed: bool,
     /// The SPIFFE ID that signed the stream, when its signatures hold.
     pub signer: Option<String>,
     /// Whether the signer's SVID was checked against a trust bundle.
@@ -643,6 +645,7 @@ fn verify_stream(
     status: &mut StreamReport,
 ) {
     let start_seq = start.as_ref().and_then(|start| start.seq);
+    status.signed = start.is_some();
     let key = match (start, trust) {
         (Some(start), _) => match first_key(stream, &start, trust) {
             Ok((signer, node, key)) => {
@@ -653,6 +656,9 @@ fn verify_stream(
             }
             Err(problem) => {
                 status.problems.push(problem);
+                lines.sort_unstable_by_key(|(seq, _)| *seq);
+                lines.dedup_by_key(|(seq, _)| *seq);
+                status.lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
                 return;
             }
         },
@@ -667,9 +673,12 @@ fn verify_stream(
     // names. That is proven by the first signed checkpoint.
     if status.node.is_some() && start_seq.is_none_or(|seq| status.verified <= seq) {
         status.node = None;
-        status
-            .problems
-            .push("no checkpoint covers the start line, so its sandbox is unproven".into());
+        // A stream that already failed has its cause reported.
+        if status.problems.is_empty() {
+            status
+                .problems
+                .push("no checkpoint covers the start line, so its sandbox is unproven".into());
+        }
     }
 }
 
@@ -795,8 +804,9 @@ fn check(
         status.checkpoints = status.checkpoints.saturating_add(1);
         prev = hash;
         next = checkpoint.last.saturating_add(1);
+        // Kept as it grows, so a later problem leaves what did verify.
+        status.verified = next;
     }
-    status.verified = next;
     if status.ended && next != status.lines {
         status.problems.push(format!(
             "lines {next} to {} of an ended stream have no checkpoint",
@@ -1257,10 +1267,14 @@ mod tests {
     fn only_expected_sinks_may_sign() {
         let (out, _) = signed_stream(10, &sink_svid());
         let report = verify(&out, Some(&trust(&["spiffe://creche.test/other"])));
+        let s = &report.streams["s1"];
         assert_eq!(
-            report.streams["s1"].problems,
+            s.problems,
             ["signed by spiffe://creche.test/sink, which is not an expected sink"]
         );
+        // Signed, but not by a sink it accepts. The lines are still counted.
+        assert!(s.signed && s.signer.is_none());
+        assert_eq!((s.lines, s.verified), (11, 0));
         let report = verify(
             &out,
             Some(&trust(&[
@@ -1367,6 +1381,32 @@ mod tests {
             ["no checkpoint covers the start line, so its sandbox is unproven"]
         );
         assert_eq!(s.node, None);
+    }
+
+    #[test]
+    fn a_broken_stream_reports_its_cause_and_what_did_verify() {
+        let (out, _) = signed_stream(600, &sink_svid());
+        let text = String::from_utf8(out).unwrap();
+        let trust = on_nodes("sb sink\n");
+        // A changed line in the last checkpoint's range: the first two hold.
+        let changed = text.replacen("\"creche.seq\":550,", "\"creche.seq\":550 ,", 1);
+        assert_ne!(changed, text);
+        let report = verify(changed.as_bytes(), Some(&trust));
+        let s = &report.streams["s1"];
+        assert_eq!(
+            s.problems,
+            ["lines 512 to 600 do not match their checkpoint"]
+        );
+        assert_eq!((s.verified, s.node.as_deref()), (512, Some("sink")));
+        // A missing line: nothing verifies, and only the gap is reported.
+        let missing: String = text
+            .split_inclusive('\n')
+            .filter(|l| !l.contains("\"creche.seq\":3,"))
+            .collect();
+        let report = verify(missing.as_bytes(), Some(&trust));
+        let s = &report.streams["s1"];
+        assert_eq!(s.problems, ["expected line 3, found 4"]);
+        assert_eq!((s.verified, s.node.as_deref()), (0, None));
     }
 
     #[test]

@@ -252,6 +252,7 @@ fn verify(
                 None => writeln!(out, "  signed by {id}, trusted by the bundle")?,
             },
             Some(id) => writeln!(out, "  signed by {id}, not checked against a trust bundle")?,
+            None if s.signed => writeln!(out, "  signature not accepted")?,
             None => writeln!(out, "  not signed")?,
         }
         for problem in &s.problems {
