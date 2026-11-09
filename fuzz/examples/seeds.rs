@@ -6,7 +6,10 @@
 use std::fs;
 use std::path::Path;
 
-use creche_wire::{ARGS_LEN, CGROUP_LEN, Header, Kind, PATH_LEN, sample};
+use creche_wire::{
+    ARGS_LEN, CGROUP_LEN, CGROUP_PATH_LEN, Header, Kind, LABEL_KEY_LEN, LABEL_VALUE_LEN,
+    MAX_LABELS, MAX_RECORD_LEN, PATH_LEN, encode_cgroup, sample,
+};
 use zerocopy::IntoBytes as _;
 
 /// A record of `kind` for pid 7 with `body` after its header.
@@ -52,10 +55,24 @@ fn main() {
     let open_len = u32::try_from(PATH_LEN).unwrap().to_ne_bytes();
     let open = record(Kind::OpenWrite, &[&open_len, &control[..PATH_LEN]]);
     let fork = record(Kind::Fork, &[&1_u32.to_ne_bytes(), &[0; 4]]);
+    // The task's cgroup, described first: the longest path and every label at
+    // its longest, with values JSON must escape.
+    let keys: Vec<String> = (0..MAX_LABELS)
+        .map(|i| format!("{i}{}", "k".repeat(LABEL_KEY_LEN - 1)))
+        .collect();
+    let value = "\"\\".repeat(LABEL_VALUE_LEN / 2);
+    let labels: Vec<(&[u8], &[u8])> = keys
+        .iter()
+        .map(|k| (k.as_bytes(), value.as_bytes()))
+        .collect();
+    let mut cgroup = vec![0; MAX_RECORD_LEN];
+    let len = encode_cgroup(7, 1, 9, 0, &[b'"'; CGROUP_PATH_LEN], &labels, &mut cgroup).unwrap();
+    cgroup.truncate(len);
     let seeds = [
         sample::stream(8),
         [task.clone(), exec].concat(),
-        [task, fork, open].concat(),
+        [task.clone(), fork.clone(), open].concat(),
+        [cgroup, task, fork].concat(),
     ];
 
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
