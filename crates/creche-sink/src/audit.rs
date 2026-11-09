@@ -656,9 +656,7 @@ fn verify_stream(
             }
             Err(problem) => {
                 status.problems.push(problem);
-                lines.sort_unstable_by_key(|(seq, _)| *seq);
-                lines.dedup_by_key(|(seq, _)| *seq);
-                status.lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+                drop_repeats(lines, checkpoints, status);
                 return;
             }
         },
@@ -715,6 +713,39 @@ fn first_key(
     Ok((start.spiffe_id.clone(), node, key))
 }
 
+/// Drops byte-identical repeats of lines and checkpoints and counts them, and
+/// the distinct lines left. Two different lines or checkpoints for the same
+/// place both stay.
+fn drop_repeats(
+    lines: &mut Vec<(u64, &[u8])>,
+    checkpoints: &mut Vec<Checkpoint>,
+    status: &mut StreamReport,
+) {
+    let before = lines.len().saturating_add(checkpoints.len());
+    lines.sort_unstable();
+    lines.dedup();
+    checkpoints.sort_unstable();
+    checkpoints.dedup();
+    let after = lines.len().saturating_add(checkpoints.len());
+    status.duplicates = u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX);
+    status.lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+}
+
+/// Where the sorted lines stop being numbered 0, 1, 2 and so on, and why.
+fn first_gap(lines: &[(u64, &[u8])]) -> Option<(u64, String)> {
+    (0_u64..)
+        .zip(lines.iter())
+        .find(|(expected, (seq, _))| seq != expected)
+        .map(|(expected, (seq, _))| {
+            let problem = if expected.checked_sub(1) == Some(*seq) {
+                format!("two different lines claim line {seq}")
+            } else {
+                format!("expected line {expected}, found {seq}")
+            };
+            (expected, problem)
+        })
+}
+
 /// Checks one stream's lines against its checkpoints, and in a signed stream,
 /// each checkpoint's signature with the key the one before it named.
 fn check(
@@ -724,27 +755,10 @@ fn check(
     mut key: Option<VerifyingKey>,
     status: &mut StreamReport,
 ) {
-    // Byte-identical repeats go. Two different lines or checkpoints for the
-    // same place stay, and fail below.
-    let before = lines.len().saturating_add(checkpoints.len());
-    lines.sort_unstable();
-    lines.dedup();
-    checkpoints.sort_unstable();
-    checkpoints.dedup();
-    let after = lines.len().saturating_add(checkpoints.len());
-    status.duplicates = u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX);
-    status.lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
-    for (expected, (seq, _)) in (0_u64..).zip(lines.iter()) {
-        if *seq != expected {
-            let problem = if expected.checked_sub(1) == Some(*seq) {
-                format!("two different lines claim line {seq}")
-            } else {
-                format!("expected line {expected}, found {seq}")
-            };
-            status.problems.push(problem);
-            return;
-        }
-    }
+    drop_repeats(lines, checkpoints, status);
+    // Checkpoints before the first break in the numbering still verify.
+    let gap = first_gap(lines);
+    let numbered = gap.as_ref().map_or(u64::MAX, |(at, _)| *at);
     if let Some(pair) = checkpoints.windows(2).find(|w| w[0].first == w[1].first) {
         status.problems.push(format!(
             "two different checkpoints start at line {}",
@@ -767,6 +781,10 @@ fn check(
                 "checkpoint from {} does not follow the previous one",
                 checkpoint.first
             ));
+            return;
+        }
+        if checkpoint.last >= numbered {
+            status.problems.extend(gap.map(|(_, problem)| problem));
             return;
         }
         let covered = usize::try_from(checkpoint.first)
@@ -806,6 +824,10 @@ fn check(
         next = checkpoint.last.saturating_add(1);
         // Kept as it grows, so a later problem leaves what did verify.
         status.verified = next;
+    }
+    if let Some((_, problem)) = gap {
+        status.problems.push(problem);
+        return;
     }
     if status.ended && next != status.lines {
         status.problems.push(format!(
@@ -1275,6 +1297,21 @@ mod tests {
         // Signed, but not by a sink it accepts. The lines are still counted.
         assert!(s.signed && s.signer.is_none());
         assert_eq!((s.lines, s.verified), (11, 0));
+        // As distinct lines: a repeat counts once, a different line for the
+        // same place twice.
+        let text = String::from_utf8(out.clone()).unwrap();
+        let line5 = text
+            .lines()
+            .find(|l| l.contains("\"creche.seq\":5,"))
+            .unwrap();
+        let other = line5.replace("creche.test", "creche.tesT");
+        let more = format!("{text}{line5}\n{other}\n");
+        let report = verify(
+            more.as_bytes(),
+            Some(&trust(&["spiffe://creche.test/other"])),
+        );
+        let s = &report.streams["s1"];
+        assert_eq!((s.lines, s.duplicates), (12, 1));
         let report = verify(
             &out,
             Some(&trust(&[
@@ -1398,6 +1435,19 @@ mod tests {
             ["lines 512 to 600 do not match their checkpoint"]
         );
         assert_eq!((s.verified, s.node.as_deref()), (512, Some("sink")));
+        // A missing line after the first two checkpoints: they still verify,
+        // and the node stays proven.
+        let gap_late: String = text
+            .split_inclusive('\n')
+            .filter(|l| !l.contains("\"creche.seq\":550,"))
+            .collect();
+        let report = verify(gap_late.as_bytes(), Some(&trust));
+        let s = &report.streams["s1"];
+        assert_eq!(s.problems, ["expected line 550, found 551"]);
+        assert_eq!(
+            (s.verified, s.checkpoints, s.node.as_deref()),
+            (512, 2, Some("sink"))
+        );
         // A missing line: nothing verifies, and only the gap is reported.
         let missing: String = text
             .split_inclusive('\n')
