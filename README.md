@@ -81,6 +81,22 @@ cargo build --release -p creche-sink
 cargo build --release -p creche-observer --target x86_64-unknown-linux-musl   # static, for the guest image
 ```
 
+## Releases
+
+Each `v*` tag publishes static x86_64 musl builds of `creche-observer` and
+`creche-sink` as reproducible tarballs, a `checksums.txt` signed keyless with
+cosign, and SLSA provenance. A merged dependency fix that Renovate marks
+`[security]` cuts a patch release on its own. To verify a download:
+
+```sh
+sha256sum --check --ignore-missing checksums.txt
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/Pinguladora/creche/' checksums.txt
+slsa-verifier verify-artifact --provenance-path provenance.intoto.jsonl \
+  --source-uri github.com/Pinguladora/creche creche-sink_Linux_x86_64.tar.gz
+```
+
 ## Checks
 
 ```sh
