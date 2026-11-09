@@ -19,7 +19,7 @@ yamlfmt = "0.21.0"                 # YAML formatter (hk pairs it with yamllint)
 yamllint = "1.38.0"
 kingfisher = "2.16.0"              # secret scanner (hk)
 "github:sourcefrog/cargo-mutants" = "27.1.0"   # mutation testing (mise run mutants)
-pinact = "5.0.0"                   # pin GitHub Actions to a SHA (hk pre-push)
+pinact = "5.0.2"                   # pin GitHub Actions to a SHA (hk pre-push)
 "github:rust-fuzz/cargo-fuzz" = "0.13.2"
 
 [tasks.fuzz]
