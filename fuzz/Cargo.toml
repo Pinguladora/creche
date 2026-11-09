@@ -1,0 +1,41 @@
+# Fuzz targets for the code that reads guest bytes. A workspace of its own, so
+# the main workspace never builds libFuzzer. Run with `mise run fuzz`.
+[package]
+name = "creche-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+creche-sink = { path = "../crates/creche-sink" }
+creche-wire = { path = "../crates/creche-wire", features = ["sample"] }
+libfuzzer-sys = "0.4.10"
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+zerocopy = "0.8"
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sink_stream"
+path = "fuzz_targets/sink_stream.rs"
+test = false
+doc = false
+bench = false
+
+# Writes seed inputs for every target into corpus/. `mise run fuzz` runs it.
+[[example]]
+name = "seeds"
+test = false
+
+[workspace]
+members = ["."]

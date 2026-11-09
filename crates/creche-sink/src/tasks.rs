@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use creche_wire::Context;
 
+use crate::k8s::Container;
+
 /// Most processes tracked per stream. Exits remove them, so this is only reached
 /// when exit records were lost. Then an arbitrary entry makes room.
 const MAX_TASKS: usize = 1 << 16;
@@ -22,6 +24,9 @@ pub struct TaskInfo {
     pub comm: Arc<str>,
     /// cgroup v2 leaf name, shared the same way.
     pub cgroup: Arc<str>,
+    /// The pod's container the guest claims for that cgroup, when the host
+    /// confirms it belongs to this sandbox.
+    pub container: Option<Arc<Container>>,
 }
 
 impl TaskInfo {
@@ -35,6 +40,7 @@ impl TaskInfo {
             cgroup_id: context.cgroup_id,
             comm: lossy(context.comm),
             cgroup: lossy(cgroup),
+            container: None,
         }
     }
 }
@@ -81,10 +87,10 @@ impl Tasks {
     /// An exec record's context replaces all but the cgroup name, which only
     /// task records carry. The guest sends one first when the name changed.
     pub fn exec(&mut self, pid: u32, context: &Context<'_>) {
-        let cgroup = self
-            .by_pid
-            .get(&pid)
-            .map_or_else(|| Arc::from(""), |known| Arc::clone(&known.cgroup));
+        let (cgroup, container) = self.by_pid.get(&pid).map_or_else(
+            || (Arc::from(""), None),
+            |known| (Arc::clone(&known.cgroup), known.container.clone()),
+        );
         let comm = match self.by_pid.get(&pid) {
             Some(known) if known.comm.as_bytes() == context.comm => Arc::clone(&known.comm),
             _ => lossy(context.comm),
@@ -97,6 +103,7 @@ impl Tasks {
                 cgroup_id: context.cgroup_id,
                 comm,
                 cgroup,
+                container,
             },
         );
     }
@@ -124,6 +131,7 @@ mod tests {
             cgroup_id: 9,
             comm: comm.into(),
             cgroup: "cri-containerd-x.scope".into(),
+            container: None,
         }
     }
 

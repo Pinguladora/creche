@@ -5,7 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use creche_wire::{Body, DecodeError, Records};
 
-use crate::json;
+use crate::audit::Chain;
+use crate::json::{self, Origin, Value};
+use crate::k8s::Containers;
 use crate::tasks::{TaskInfo, Tasks};
 
 /// What the sink writes for each stream.
@@ -29,8 +31,28 @@ pub struct StreamDecoder {
     format: Format,
     /// Incomplete record carried over from the previous input.
     pending: Vec<u8>,
-    /// Context of the stream's processes, from its task records (JSON only).
+    /// What JSON rendering keeps across inputs.
+    json: JsonState,
+    /// The stream's audit chain, when enabled (JSON only).
+    chain: Option<Chain>,
+}
+
+/// What JSON rendering keeps across inputs.
+#[derive(Debug, Default)]
+struct JsonState {
+    /// Context of the stream's processes, from its task records.
     tasks: Tasks,
+    /// Checks the containers the guest claims, when its pod is known.
+    containers: Option<Containers>,
+    /// The next line's `creche.seq`.
+    seq: u64,
+}
+
+/// Returns `*seq` and advances it.
+fn next(seq: &mut u64) -> u64 {
+    let current = *seq;
+    *seq = current.saturating_add(1);
+    current
 }
 
 impl StreamDecoder {
@@ -40,6 +62,80 @@ impl StreamDecoder {
         Self {
             format,
             ..Self::default()
+        }
+    }
+
+    /// Also reports the pod's container each process runs in, as the guest
+    /// claims it and `containers` confirms it.
+    #[must_use]
+    pub fn with_containers(mut self, containers: Containers) -> Self {
+        self.json.containers = Some(containers);
+        self
+    }
+
+    /// Also keeps an audit chain over the JSON lines, with a checkpoint line
+    /// whenever one falls due (see [`crate::audit`]).
+    #[must_use]
+    pub fn with_audit(mut self) -> Self {
+        self.chain = Some(Chain::default());
+        self
+    }
+
+    /// Also keeps an audit chain, signed with keys that start from one `svid`
+    /// vouches for. Returns the fields the stream's start line must carry.
+    ///
+    /// # Errors
+    ///
+    /// When the system's random source cannot be read.
+    pub fn with_signed_audit(
+        mut self,
+        stream: &str,
+        svid: &crate::spiffe::Svid,
+    ) -> std::io::Result<(Self, Vec<(&'static str, String)>)> {
+        let (chain, fields) = Chain::signed(stream, svid)?;
+        self.chain = Some(chain);
+        Ok((self, fields))
+    }
+
+    /// Writes an event the sink reports about this stream, such as its start or
+    /// end, as the stream's next line. Nothing in the raw format.
+    pub fn event(
+        &mut self,
+        origin: &Origin,
+        name: &str,
+        observed_ns: u64,
+        fields: &[(&str, Value<'_>)],
+        out: &mut Vec<u8>,
+    ) {
+        if self.format != Format::Json {
+            return;
+        }
+        let start = out.len();
+        let seq = next(&mut self.json.seq);
+        json::sink_event(origin, name, observed_ns, Some(seq), fields, out);
+        self.audit(origin, observed_ns, start, out);
+    }
+
+    /// Writes the last checkpoint, covering every line so far. For when the
+    /// stream ends.
+    pub fn finish(&mut self, origin: &Origin, observed_ns: u64, out: &mut Vec<u8>) {
+        if let Some(chain) = &mut self.chain {
+            chain.checkpoint(origin, observed_ns, out);
+        }
+    }
+
+    /// Hashes the lines written to `out` since `start`, then writes a checkpoint
+    /// if one is due.
+    fn audit(&mut self, origin: &Origin, observed_ns: u64, start: usize, out: &mut Vec<u8>) {
+        if let Some(chain) = &mut self.chain {
+            chain.absorb(
+                out.get(start..).unwrap_or_default(),
+                self.json.seq,
+                observed_ns,
+            );
+            if chain.due(observed_ns) {
+                chain.checkpoint(origin, observed_ns, out);
+            }
         }
     }
 
@@ -53,10 +149,10 @@ impl StreamDecoder {
     pub fn feed(
         &mut self,
         data: &[u8],
-        sandbox: &str,
+        origin: &Origin,
         out: &mut Vec<u8>,
     ) -> Result<(), DecodeError> {
-        self.feed_at(data, sandbox, now_ns(), out)
+        self.feed_at(data, origin, now_ns(), out)
     }
 
     /// [`StreamDecoder::feed`] with an explicit observed time, in nanoseconds
@@ -68,28 +164,35 @@ impl StreamDecoder {
     pub fn feed_at(
         &mut self,
         data: &[u8],
-        sandbox: &str,
+        origin: &Origin,
         observed_ns: u64,
         out: &mut Vec<u8>,
     ) -> Result<(), DecodeError> {
         let format = self.format;
-        if self.pending.is_empty() {
-            let used = write_all(format, data, sandbox, observed_ns, &mut self.tasks, out)?;
-            self.pending
-                .extend_from_slice(data.get(used..).unwrap_or_default());
+        let start = out.len();
+        // Lines written before a corrupt record are valid and stay in `out`,
+        // so they are hashed either way.
+        let result = if self.pending.is_empty() {
+            write_all(format, data, origin, observed_ns, &mut self.json, out).map(|used| {
+                self.pending
+                    .extend_from_slice(data.get(used..).unwrap_or_default());
+            })
         } else {
             self.pending.extend_from_slice(data);
-            let used = write_all(
+            write_all(
                 format,
                 &self.pending,
-                sandbox,
+                origin,
                 observed_ns,
-                &mut self.tasks,
+                &mut self.json,
                 out,
-            )?;
-            self.pending.drain(..used);
+            )
+            .map(|used| drop(self.pending.drain(..used)))
+        };
+        if format == Format::Json {
+            self.audit(origin, observed_ns, start, out);
         }
-        Ok(())
+        result
     }
 
     /// Bytes of an incomplete record waiting for more input.
@@ -100,7 +203,7 @@ impl StreamDecoder {
 }
 
 /// Nanoseconds since the Unix epoch, 0 if the clock is before it.
-fn now_ns() -> u64 {
+pub(crate) fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
@@ -110,14 +213,14 @@ fn now_ns() -> u64 {
 fn write_all(
     format: Format,
     buf: &[u8],
-    sandbox: &str,
+    origin: &Origin,
     observed_ns: u64,
-    tasks: &mut Tasks,
+    state: &mut JsonState,
     out: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
     match format {
-        Format::Json => render_all(buf, sandbox, observed_ns, tasks, out),
-        Format::Raw => frame_all(buf, sandbox, out),
+        Format::Json => render_all(buf, origin, observed_ns, state, out),
+        Format::Raw => frame_all(buf, origin.id(), out),
     }
 }
 
@@ -125,9 +228,9 @@ fn write_all(
 /// they took. Task records update the process contexts instead of being rendered.
 fn render_all(
     buf: &[u8],
-    sandbox: &str,
+    origin: &Origin,
     observed_ns: u64,
-    tasks: &mut Tasks,
+    state: &mut JsonState,
     out: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
     let mut records = Records::new(buf);
@@ -135,20 +238,32 @@ fn render_all(
         let record = record?;
         let pid = record.header.pid;
         match record.body {
-            Body::Task { context, cgroup } => tasks.set(pid, TaskInfo::new(&context, cgroup)),
+            Body::Task { context, cgroup } => {
+                let mut info = TaskInfo::new(&context, cgroup);
+                if let Some(containers) = state.containers.as_mut() {
+                    info.container = containers.claim(&info.cgroup);
+                }
+                state.tasks.set(pid, info);
+            }
             Body::Exec { context, .. } => {
-                tasks.exec(pid, &context);
-                json::render(sandbox, &record, tasks.get(pid), observed_ns, out);
+                state.tasks.exec(pid, &context);
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
             }
             Body::Fork { ppid } => {
-                tasks.fork(ppid, pid);
-                json::render(sandbox, &record, tasks.get(pid), observed_ns, out);
+                state.tasks.fork(ppid, pid);
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
             }
             Body::Exit { .. } => {
-                json::render(sandbox, &record, tasks.get(pid), observed_ns, out);
-                tasks.exit(pid);
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                state.tasks.exit(pid);
             }
-            _ => json::render(sandbox, &record, tasks.get(pid), observed_ns, out),
+            _ => {
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+            }
         }
     }
     Ok(records.consumed())
@@ -206,7 +321,7 @@ mod tests {
     fn whole_stream_at_once() {
         let mut d = StreamDecoder::default();
         let mut out = Vec::new();
-        d.feed_at(&stream(3), "sb", 7, &mut out).unwrap();
+        d.feed_at(&stream(3), &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(std::str::from_utf8(&out).unwrap().lines().count(), 3);
         assert_eq!(d.pending(), 0);
     }
@@ -216,10 +331,10 @@ mod tests {
         let mut d = StreamDecoder::default();
         let mut out = Vec::new();
         let rec = heartbeat(1);
-        d.feed_at(&rec[..10], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[..10], &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(d.pending(), 10);
         assert_eq!(out, b"");
-        d.feed_at(&rec[10..], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[10..], &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(d.pending(), 0);
         assert_ne!(out, b"");
     }
@@ -230,7 +345,7 @@ mod tests {
         bad[2..4].copy_from_slice(&3_u16.to_ne_bytes());
         let mut out = Vec::new();
         assert_eq!(
-            StreamDecoder::default().feed_at(&bad, "sb", 7, &mut out),
+            StreamDecoder::default().feed_at(&bad, &"sb".into(), 7, &mut out),
             Err(DecodeError::BadLength { len: 3 })
         );
     }
@@ -240,10 +355,10 @@ mod tests {
         let mut d = StreamDecoder::default();
         let mut out = Vec::new();
         let rec = heartbeat(1);
-        d.feed_at(&rec[..10], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[..10], &"sb".into(), 7, &mut out).unwrap();
         let mut rest = rec[10..].to_vec();
         rest.extend_from_slice(&[0xff; 60]);
-        assert!(d.feed_at(&rest, "sb", 7, &mut out).is_err());
+        assert!(d.feed_at(&rest, &"sb".into(), 7, &mut out).is_err());
     }
 
     /// A record of `kind` for `pid` with `body` after the header.
@@ -308,7 +423,7 @@ mod tests {
         .concat();
         let mut out = Vec::new();
         StreamDecoder::default()
-            .feed_at(&data, "sb", 7, &mut out)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
             .unwrap();
         let l = lines(&out);
         let summary: Vec<_> = l
@@ -345,11 +460,154 @@ mod tests {
     }
 
     #[test]
+    fn processes_carry_the_container_the_host_confirms() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::Arc;
+
+        let ours = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
+        let theirs = "b".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        for (id, sandbox) in [(ours, "sb"), (theirs.as_str(), "other")] {
+            let dir = tmp.path().join(id);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(
+                dir.join("config.json"),
+                format!(
+                    r#"{{"annotations":{{"io.kubernetes.cri.container-type":"container",
+                    "io.kubernetes.cri.sandbox-id":"{sandbox}",
+                    "io.kubernetes.cri.container-name":"agent"}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let fork = |child: u32, parent: u32| {
+            rec(
+                Kind::Fork,
+                child,
+                &[&parent.to_ne_bytes()[..], &[0; 4]].concat(),
+            )
+        };
+        let data = [
+            task(
+                10,
+                1,
+                &sh,
+                format!("cri-containerd-{ours}.scope\0").as_bytes(),
+            ),
+            fork(11, 10),
+            rec(Kind::Exit, 11, &[0; 8]),
+            // Another pod's container, and a guest service.
+            task(
+                20,
+                1,
+                &sh,
+                format!("cri-containerd-{theirs}.scope\0").as_bytes(),
+            ),
+            fork(21, 20),
+            task(30, 1, &sh, b"kata-agent.service\0"),
+            fork(31, 30),
+        ]
+        .concat();
+        let containers = Containers::new(Arc::from(tmp.path()), Arc::from("sb"));
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .with_containers(containers)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let claimed: Vec<_> = lines(&out)
+            .iter()
+            .map(|v| {
+                (
+                    v["process.pid"].as_u64().unwrap(),
+                    v["creche.guest.container.id"].as_str().map(str::to_owned),
+                    v["creche.guest.container.name"].as_str().map(str::to_owned),
+                )
+            })
+            .collect();
+        let agent = (Some(ours.to_owned()), Some("agent".to_owned()));
+        assert_eq!(
+            claimed,
+            [
+                (11, agent.0.clone(), agent.1.clone()),
+                (11, agent.0, agent.1),
+                (21, None, None),
+                (31, None, None),
+            ]
+        );
+
+        // Without a checker, nothing is claimed.
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        assert!(
+            lines(&out)
+                .iter()
+                .all(|v| v.get("creche.guest.container.id").is_none())
+        );
+    }
+
+    #[test]
+    fn audited_streams_number_their_lines_and_verify() {
+        let origin = Origin::from("sb").with_stream("s1");
+        let mut d = StreamDecoder::new(Format::Json).with_audit();
+        let mut out = Vec::new();
+        d.event(&origin, "creche.stream.start", 1, &[], &mut out);
+        // 300 heartbeats in uneven chunks: one checkpoint falls due by count.
+        let data = stream(300);
+        for part in data.chunks(1000) {
+            d.feed_at(part, &origin, 2, &mut out).unwrap();
+        }
+        d.event(
+            &origin,
+            "creche.stream.end",
+            3,
+            &[("creche.stream.end_reason", Value::Str("closed"))],
+            &mut out,
+        );
+        d.finish(&origin, 3, &mut out);
+
+        let l = lines(&out);
+        let seqs: Vec<u64> = l.iter().filter_map(|v| v["creche.seq"].as_u64()).collect();
+        assert_eq!(seqs, (0..302).collect::<Vec<_>>());
+        let checkpoints: Vec<_> = l
+            .iter()
+            .filter(|v| v["event.name"] == "creche.audit.checkpoint")
+            .map(|v| {
+                (
+                    v["creche.seq.first"].as_u64(),
+                    v["creche.seq.last"].as_u64(),
+                )
+            })
+            .collect();
+        // The first falls due inside a chunk and is written after it.
+        let [(Some(0), Some(cut)), (Some(next), Some(301))] = checkpoints[..] else {
+            panic!("{checkpoints:?}");
+        };
+        assert!(cut >= 255 && next == cut + 1, "{checkpoints:?}");
+        let report = crate::audit::verify(&out, None);
+        assert!(report.intact(), "{report:?}");
+        assert_eq!(report.streams["s1"].verified, 302);
+    }
+
+    #[test]
+    fn raw_streams_have_no_sink_events() {
+        let origin = Origin::from("sb").with_stream("s1");
+        let mut d = StreamDecoder::new(Format::Raw).with_audit();
+        let mut out = Vec::new();
+        d.event(&origin, "creche.stream.start", 1, &[], &mut out);
+        d.finish(&origin, 1, &mut out);
+        assert_eq!(out, b"");
+    }
+
+    #[test]
     fn feed_stamps_records_with_the_wall_clock() {
         let before = now_ns();
         let mut out = Vec::new();
         StreamDecoder::default()
-            .feed(&heartbeat(1), "sb", &mut out)
+            .feed(&heartbeat(1), &"sb".into(), &mut out)
             .unwrap();
         let after = now_ns();
         let line: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -379,8 +637,10 @@ mod tests {
         let mut d = StreamDecoder::new(Format::Raw);
         let mut out = Vec::new();
         // The first chunk ends inside the second record: only the first is framed.
-        d.feed_at(&data[..100], "sb-1", 7, &mut out).unwrap();
-        d.feed_at(&data[100..], "sb-1", 7, &mut out).unwrap();
+        d.feed_at(&data[..100], &"sb-1".into(), 7, &mut out)
+            .unwrap();
+        d.feed_at(&data[100..], &"sb-1".into(), 7, &mut out)
+            .unwrap();
         let got = frames(&out);
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|(id, _)| id == "sb-1"));
@@ -394,13 +654,13 @@ mod tests {
         let rec = heartbeat(1);
         let mut d = StreamDecoder::new(Format::Raw);
         let mut out = Vec::new();
-        d.feed_at(&rec[..10], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[..10], &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(out, b"");
         let mut bad = heartbeat(1);
         bad[2..4].copy_from_slice(&3_u16.to_ne_bytes());
         assert!(
             StreamDecoder::new(Format::Raw)
-                .feed_at(&bad, "sb", 7, &mut out)
+                .feed_at(&bad, &"sb".into(), 7, &mut out)
                 .is_err()
         );
         assert_eq!(out, b"");
@@ -418,7 +678,7 @@ mod tests {
             let mut out = Vec::new();
             let mut start = 0;
             for end in offsets.into_iter().chain([data.len()]) {
-                d.feed_at(&data[start..end], "sb", 7, &mut out).unwrap();
+                d.feed_at(&data[start..end], &"sb".into(), 7, &mut out).unwrap();
                 start = end;
             }
             let mut joined = Vec::new();
@@ -441,7 +701,7 @@ mod tests {
         fn chunking_does_not_change_the_output(count in 0_u64..20, cuts in proptest::collection::vec(any::<prop::sample::Index>(), 0..10)) {
             let data = stream(count);
             let mut whole = Vec::new();
-            StreamDecoder::default().feed_at(&data, "sb", 7, &mut whole).unwrap();
+            StreamDecoder::default().feed_at(&data, &"sb".into(), 7, &mut whole).unwrap();
 
             let mut offsets: Vec<usize> = cuts.iter().map(|i| i.index(data.len() + 1)).collect();
             offsets.sort_unstable();
@@ -449,7 +709,7 @@ mod tests {
             let mut chunked = Vec::new();
             let mut start = 0;
             for end in offsets.into_iter().chain([data.len()]) {
-                d.feed_at(&data[start..end], "sb", 7, &mut chunked).unwrap();
+                d.feed_at(&data[start..end], &"sb".into(), 7, &mut chunked).unwrap();
                 start = end;
             }
             prop_assert_eq!(chunked, whole);

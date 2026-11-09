@@ -2,8 +2,9 @@
 
 use std::io::Write as _;
 
-use creche_wire::{Body, Kind, Record};
+use creche_wire::{Body, HelloFlags, Kind, Record};
 
+use crate::k8s::{Pod, Unresolved};
 use crate::tasks::TaskInfo;
 
 /// A JSON key with the comma before it, as one literal: `key!("pid")` is `,"pid":`.
@@ -13,7 +14,139 @@ macro_rules! key {
     };
 }
 
-/// Appends `record`, from `sandbox`, to `out` as one JSON object and a newline.
+/// What the host attests about a stream's origin, rendered once as the start
+/// of every line: the sandbox id and, when known, its pod.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Origin {
+    id: Box<str>,
+    /// Attribute names and values, in line order.
+    attributes: Vec<(&'static str, Box<str>)>,
+    /// The attributes rendered as the start of a JSON object.
+    json: Box<[u8]>,
+}
+
+/// What is known about the pod a sandbox belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Attribution {
+    /// Not looked up, as for a captured stream.
+    None,
+    /// The pod the container runtime recorded.
+    Pod(Pod),
+    /// Looked up, but not known, and why.
+    Unresolved(Unresolved),
+}
+
+impl Origin {
+    /// The origin of a stream from sandbox `id`.
+    #[must_use]
+    pub fn new(id: &str, attribution: &Attribution) -> Self {
+        let mut attributes: Vec<(&'static str, Box<str>)> = vec![("creche.sandbox.id", id.into())];
+        match attribution {
+            Attribution::None => {}
+            Attribution::Pod(pod) => attributes.extend([
+                ("k8s.pod.name", (*pod.name).into()),
+                ("k8s.namespace.name", (*pod.namespace).into()),
+                ("k8s.pod.uid", (*pod.uid).into()),
+            ]),
+            Attribution::Unresolved(why) => {
+                attributes.push(("creche.k8s.unresolved", why.as_str().into()));
+            }
+        }
+        Self {
+            id: id.into(),
+            json: render_attributes(&attributes),
+            attributes,
+        }
+    }
+
+    /// The same origin, naming the stream `stream` on every line, so lines can
+    /// be grouped and their audit chain checked per stream.
+    #[must_use]
+    pub fn with_stream(mut self, stream: &str) -> Self {
+        self.attributes.push(("creche.stream.id", stream.into()));
+        self.json = render_attributes(&self.attributes);
+        self
+    }
+
+    /// The sandbox id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Length of the JSON every line from this origin starts with.
+    pub(crate) fn json_len(&self) -> usize {
+        self.json.len()
+    }
+
+    /// The attested attributes every line starts with, as name and value.
+    pub fn attributes(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.attributes.iter().map(|(k, v)| (*k, &**v))
+    }
+}
+
+/// `{"name":"value",...` without the closing brace. Names need no escaping.
+fn render_attributes(attributes: &[(&'static str, Box<str>)]) -> Box<[u8]> {
+    let mut json = vec![b'{'];
+    for (i, (name, value)) in attributes.iter().enumerate() {
+        if i > 0 {
+            json.push(b',');
+        }
+        json.push(b'"');
+        json.extend_from_slice(name.as_bytes());
+        json.extend_from_slice(b"\":");
+        push_json_str(&mut json, value);
+    }
+    json.into()
+}
+
+impl From<&str> for Origin {
+    /// A sandbox id with no pod lookup.
+    fn from(id: &str) -> Self {
+        Self::new(id, &Attribution::None)
+    }
+}
+
+/// A value in an event the sink reports about itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Value<'a> {
+    /// A string, escaped as needed.
+    Str(&'a str),
+    /// An unsigned integer.
+    Num(u64),
+}
+
+/// Appends an event the sink reports about itself, such as a stream starting or
+/// a refused connection, as one JSON line. `seq` is the line's place in its
+/// stream, when it belongs to one. `fields` are written in order, after the
+/// common ones. Their names must not need escaping.
+pub fn sink_event(
+    origin: &Origin,
+    name: &str,
+    observed_ns: u64,
+    seq: Option<u64>,
+    fields: &[(&str, Value<'_>)],
+    out: &mut Vec<u8>,
+) {
+    let mut line = Line::start(out, origin);
+    line.str(key!("event.name"), name);
+    if let Some(seq) = seq {
+        line.num(key!("creche.seq"), seq);
+    }
+    line.num(key!("observed_time_unix_nano"), observed_ns);
+    for (name, value) in fields {
+        line.out.extend_from_slice(b",\"");
+        line.out.extend_from_slice(name.as_bytes());
+        line.out.extend_from_slice(b"\":");
+        match value {
+            Value::Str(s) => push_json_str(line.out, s),
+            Value::Num(n) => push_u64(line.out, *n),
+        }
+    }
+    line.end();
+}
+
+/// Appends `record`, from `origin`, to `out` as one JSON object and a newline.
 /// `task` is the context of the record's process, when the stream reported it.
 /// `observed_ns` is the host's wall clock when the record arrived, in nanoseconds
 /// since the Unix epoch: the guest only knows its own boot-time clock.
@@ -23,15 +156,17 @@ macro_rules! key {
 /// `creche.` namespace otherwise. Event names are `creche.`-namespaced too:
 /// OpenTelemetry defines no process or file events to reuse.
 pub fn render(
-    sandbox: &str,
+    origin: &Origin,
     record: &Record<'_>,
     task: Option<&TaskInfo>,
     observed_ns: u64,
+    seq: u64,
     out: &mut Vec<u8>,
 ) {
     let h = &record.header;
-    let mut line = Line::start(out, sandbox);
+    let mut line = Line::start(out, origin);
     line.str(key!("event.name"), event_name(h.kind));
+    line.num(key!("creche.seq"), seq);
     line.num(key!("observed_time_unix_nano"), observed_ns);
     line.num(key!("creche.boot_time_ns"), h.ts_ns);
     line.num(key!("process.pid"), h.pid);
@@ -41,6 +176,10 @@ pub fn render(
         line.str(key!("process.executable.name"), &t.comm);
         line.num(key!("creche.cgroup.id"), t.cgroup_id);
         line.str(key!("creche.cgroup.name"), &t.cgroup);
+        if let Some(c) = &t.container {
+            line.str(key!("creche.guest.container.id"), &c.id);
+            line.str(key!("creche.guest.container.name"), &c.name);
+        }
     }
     match record.body {
         Body::Exec { path, args, .. } => {
@@ -76,6 +215,11 @@ pub fn render(
         Body::Hello { version, flags } => {
             line.num(key!("creche.wire.version"), version);
             line.num(key!("creche.observer.flags"), flags.bits());
+            let guarded = flags.contains(HelloFlags::GUARDED);
+            line.raw(
+                key!("creche.observer.guarded"),
+                if guarded { "true" } else { "false" },
+            );
         }
         Body::Heartbeat(hb) => {
             line.num(key!("creche.observer.ringbuf_drops"), hb.ringbuf_drops);
@@ -114,7 +258,7 @@ fn event_name(code: u16) -> &'static str {
 /// Writes one JSON object. Writing to a `Vec` cannot fail.
 ///
 /// Hand-written rather than going through serde or `fmt`: every line starts with
-/// the sandbox, every other key is a literal written in one copy, strings are
+/// the origin, rendered once per stream, every other key is a literal written in one copy, strings are
 /// copied whole unless they hold a character JSON must escape, and integers are
 /// formatted into a small buffer. About 2 times faster than `serde_json`
 /// escaping plus `write!` for numbers (benches/render.rs).
@@ -123,9 +267,8 @@ struct Line<'a> {
 }
 
 impl<'a> Line<'a> {
-    fn start(out: &'a mut Vec<u8>, sandbox: &str) -> Self {
-        out.extend_from_slice(b"{\"creche.sandbox.id\":");
-        push_json_str(out, sandbox);
+    fn start(out: &'a mut Vec<u8>, origin: &Origin) -> Self {
+        out.extend_from_slice(&origin.json);
         Self { out }
     }
 
@@ -271,7 +414,7 @@ fn push_u64(out: &mut Vec<u8>, mut n: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use creche_wire::{Context, Header, HeartbeatRecord, HelloFlags};
+    use creche_wire::{Context, Header, HeartbeatRecord};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn header(kind: Kind) -> Header {
@@ -290,19 +433,21 @@ mod tests {
             cgroup_id: 7,
             comm: "wget".into(),
             cgroup: "cri-containerd-x.scope".into(),
+            container: None,
         }
     }
 
     fn rendered_with(kind: Kind, body: Body<'_>, task: Option<&TaskInfo>) -> serde_json::Value {
         let mut out = Vec::new();
         render(
-            "sb1",
+            &"sb1".into(),
             &Record {
                 header: header(kind),
                 body,
             },
             task,
             42,
+            0,
             &mut out,
         );
         assert_eq!(out.last(), Some(&b'\n'));
@@ -465,6 +610,17 @@ mod tests {
             ),
             (Some(3), Some(1))
         );
+        assert_eq!(v["creche.observer.guarded"], false);
+        let v = rendered_with(
+            Kind::Hello,
+            Body::Hello {
+                version: 3,
+                flags: HelloFlags::DEDUP.with(HelloFlags::GUARDED),
+            },
+            None,
+        );
+        assert_eq!(v["creche.observer.flags"], 5);
+        assert_eq!(v["creche.observer.guarded"], true);
 
         let hb = HeartbeatRecord {
             ringbuf_drops: 1,
@@ -493,13 +649,14 @@ mod tests {
         let mut h = header(Kind::Fork);
         h.kind = 900;
         render(
-            "sb1",
+            &"sb1".into(),
             &Record {
                 header: h,
                 body: Body::Unknown { body: b"abc" },
             },
             None,
             42,
+            0,
             &mut out,
         );
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -580,7 +737,7 @@ mod tests {
         }
         for code in [i32::MIN, -1, 0, 1, i32::MAX] {
             let mut out = Vec::new();
-            let mut line = Line::start(&mut out, "sb");
+            let mut line = Line::start(&mut out, &"sb".into());
             line.int(key!("c"), code);
             line.end();
             let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -597,7 +754,7 @@ mod tests {
         #[test]
         fn any_bytes_render_as_their_lossy_text(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64)) {
             let mut out = Vec::new();
-            let mut line = Line::start(&mut out, "sb");
+            let mut line = Line::start(&mut out, &"sb".into());
             line.bytes(key!("b"), &bytes);
             line.end();
             let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -605,17 +762,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sandbox_ids_are_escaped() {
+    fn fork_line(origin: &Origin) -> serde_json::Value {
         let mut out = Vec::new();
         render(
-            "we\"ird",
+            origin,
             &Record {
                 header: header(Kind::Fork),
                 body: Body::Fork { ppid: 1 },
             },
             None,
             42,
+            0,
+            &mut out,
+        );
+        serde_json::from_slice(&out).unwrap()
+    }
+
+    #[test]
+    fn lines_carry_the_attested_pod_or_why_it_is_unknown() {
+        let pod = Pod {
+            name: "agent-\"7".into(),
+            namespace: "agents".into(),
+            uid: "1f2e".into(),
+        };
+        let v = fork_line(&Origin::new("sb1", &Attribution::Pod(pod)));
+        assert_eq!(v["creche.sandbox.id"], "sb1");
+        assert_eq!(v["k8s.pod.name"], "agent-\"7");
+        assert_eq!(v["k8s.namespace.name"], "agents");
+        assert_eq!(v["k8s.pod.uid"], "1f2e");
+        assert!(v.get("creche.k8s.unresolved").is_none());
+
+        let v = fork_line(&Origin::new(
+            "sb1",
+            &Attribution::Unresolved(Unresolved::NoBundle),
+        ));
+        assert_eq!(v["creche.k8s.unresolved"], "no_bundle");
+        assert!(v.get("k8s.pod.name").is_none());
+
+        let v = fork_line(&"sb1".into());
+        assert!(v.get("creche.k8s.unresolved").is_none());
+        assert!(v.get("k8s.pod.name").is_none());
+        assert_eq!(Origin::from("sb1").id(), "sb1");
+    }
+
+    #[test]
+    fn sandbox_ids_are_escaped() {
+        let mut out = Vec::new();
+        render(
+            &"we\"ird".into(),
+            &Record {
+                header: header(Kind::Fork),
+                body: Body::Fork { ppid: 1 },
+            },
+            None,
+            42,
+            0,
             &mut out,
         );
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();

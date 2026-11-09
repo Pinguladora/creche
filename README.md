@@ -40,8 +40,31 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   the end of the window, so a burst costs one wakeup. Each wakeup is an interrupt,
   a timer and a vsock doorbell, all VM exits. Idle, it sleeps until the 5 s
   heartbeat.
+- **Only the observer reaches the host.** A BPF LSM program on `socket_connect`
+  refuses the observer's vsock port to every other guest process, so a workload
+  cannot send records the host would take for the observer's. The guard counts
+  the connects it sees, the observer's own included, so the observer knows it
+  runs and says so in its hello record (`creche.observer.guarded`). Kernels
+  without BPF LSM still work, reported as unguarded.
 - **Whole records only.** The forwarding queue is bounded and never splits a record
   across connections. Heartbeats report drops so silence can be told from blindness.
+- **The host attests the sandbox.** Each sandbox's socket is mode 0600, owned by
+  its VMM's user, and the sink accepts only the process holding that sandbox's
+  listening vsock socket, checked through the peer's credentials and `/proc`.
+  The sandbox id on every line comes from the host, never from the guest. What
+  the guest reports inside the stream is the guest's claim. Sandbox ids must be
+  containerd identifiers, and each sandbox gets at most 4 connections.
+- **The host names the pod.** When a connection is accepted, the sink reads the
+  sandbox's OCI spec from containerd's root-only bundle directory and takes the
+  pod's name, namespace and uid from the annotations containerd sets from
+  kubelet's request. The spec must name the same sandbox and be a sandbox's, and
+  the bundle must be owned by root and private to it. Otherwise every line says
+  why the pod is unknown, and nothing is guessed.
+- **The container is the guest's claim, checked.** A process's guest cgroup
+  (`cri-containerd-<id>.scope`) claims a container. The sink reports it as
+  `creche.guest.container.*` only when that id is a container of the same pod in
+  the runtime's bundles, so a guest cannot point at another pod. Root in the
+  guest can still move a process between its own pod's containers.
 - **Layout guard.** `build.rs` generates C static assertions from `creche-wire`'s
   layout, so a wire struct mismatch between C and Rust fails the build.
 
@@ -81,6 +104,22 @@ cargo build --release -p creche-sink
 cargo build --release -p creche-observer --target x86_64-unknown-linux-musl   # static, for the guest image
 ```
 
+## Releases
+
+Each `v*` tag publishes static x86_64 musl builds of `creche-observer` and
+`creche-sink` as reproducible tarballs, a `checksums.txt` signed keyless with
+cosign, and SLSA provenance. A merged dependency fix that Renovate marks
+`[security]` cuts a patch release on its own. To verify a download:
+
+```sh
+sha256sum --check --ignore-missing checksums.txt
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/Pinguladora/creche/' checksums.txt
+slsa-verifier verify-artifact --provenance-path provenance.intoto.jsonl \
+  --source-uri github.com/Pinguladora/creche creche-sink_Linux_x86_64.tar.gz
+```
+
 ## Checks
 
 ```sh
@@ -93,10 +132,16 @@ hk check           # all linters (fmt, clippy, cargo-deny, YAML, Actions, ...)
 ## Running
 
 ```sh
-creche-sink                     # on the host: listens for every sandbox under /run/vc/vm
+creche-sink                     # on the host, as root or the VMM's user: listens for every sandbox under /run/vc/vm
 creche-observer                 # in the guest (systemd unit before kata-agent)
 creche-observer --stdout | creche-sink -f -    # local capture and decode
 creche-sink -o raw              # the records unchanged, in frames naming their sandbox
+creche-sink -b /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io   # k3s keeps containerd's state here
+creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
+creche-sink --verify out.jsonl  # check the audit chains in saved output
+creche-sink --spiffe-socket /run/spire/agent.sock   # sign every stream with the sink's SVID
+creche-sink --verify out.jsonl --bundle bundle.pem --spiffe-id spiffe://example.org/creche-sink
+creche-sink --otlp http://127.0.0.1:4317 > archive.jsonl   # export to a node collector, keep an archive
 ```
 
 ## Output
@@ -111,19 +156,58 @@ the pipelines they already feed.
   `process.pid`, `process.parent_pid`, `process.real_user.id`,
   `process.executable.name`, `process.executable.path`, `process.command_args`
   (an array), `process.exit.code`, `file.path`, `destination.address`,
-  `destination.port`, `network.type`, `network.transport`. The rest are in the
-  `creche.` namespace: `creche.sandbox.id`, `creche.cgroup.id`,
+  `destination.port`, `network.type`, `network.transport`, and
+  `k8s.pod.name`, `k8s.namespace.name` and `k8s.pod.uid` for sandboxes that are
+  pods. The rest are in the
+  `creche.` namespace: `creche.sandbox.id`, `creche.k8s.unresolved` (why a
+  sandbox's pod is unknown), `creche.guest.container.id` and
+  `creche.guest.container.name` (the container the guest claims, confirmed to be
+  in the pod), `creche.cgroup.id`,
   `creche.cgroup.name`, `creche.boot_time_ns` (the guest's boot-time clock) and
   the observer's own figures. Event names (`event.name`) are `creche.process.exec`,
   `creche.process.fork`, `creche.process.exit`, `creche.network.connect`,
   `creche.file.open_write`, `creche.observer.hello` and
   `creche.observer.heartbeat`. `observed_time_unix_nano` is the host's clock when
   the event arrived: the guest only knows its own boot time.
+- **Audit trail** (JSON only): each connection is a stream with its own
+  `creche.stream.id`, opened by a `creche.stream.start` line naming the peer
+  (`creche.peer.pid`, `creche.peer.uid`) and closed by `creche.stream.end` with
+  `creche.stream.end_reason` (`closed`, `read_error` or `corrupt`). Every line of a
+  stream has `creche.seq`, counting from 0. A `creche.audit.checkpoint` line
+  follows once 256 lines or a second have passed and when the stream ends. It
+  covers `creche.seq.first` to `creche.seq.last` with
+  `creche.audit.hash = SHA-256(creche.audit.prev || the exact bytes of those lines)`,
+  starting from 32 zero bytes. A missing line shows as a gap in `creche.seq`, a
+  changed one as a mismatched hash. `creche-sink --verify FILE` checks saved
+  output. Refused connections are `creche.sink.refused` lines, outside any stream,
+  with the peer and `creche.sink.refusal`. The chain proves integrity only as far
+  as its checkpoints are kept out of reach, for example shipped to a second store.
+- **Signed streams** (`--spiffe-socket PATH`): the sink takes its X.509-SVID from
+  the SPIFFE Workload API. Each stream starts with a fresh P-256 key whose public
+  half (`creche.audit.key`) the SVID signs (`creche.audit.key_sig`, with the SVID
+  chain in `creche.audit.svid`). Every checkpoint is signed by the stream's current
+  key (`creche.audit.sig`) and names the next one (`creche.audit.next_key`),
+  derived from the current key and the checkpoint hash, and the current key is
+  then erased. Whoever takes over the sink later cannot sign earlier checkpoints
+  again. `creche-sink --verify FILE --bundle bundle.pem --spiffe-id ID` checks that
+  every stream is signed by one of the given sink SPIFFE IDs, with an SVID that
+  chained to the trust bundle at the stream's start. The IDs are required: any
+  other workload in the trust domain has an SVID too.
+- **OpenTelemetry logs** (`--otlp URL`, with JSON output): the same lines,
+  also exported to a collector as OTLP over gRPC (`--otlp-protocol grpc`, the
+  default, port 4317) or OTLP/HTTP (`--otlp-protocol http`, port 4318), protobuf
+  compressed with zstd, in cleartext to a collector on the node. Each line is one
+  log record whose body is the line's exact text and whose `eventName` is the
+  line's `event.name`. The stream's sandbox, pod and stream id are the resource.
+  A collector can parse the body into attributes, and the bodies, each followed
+  by a newline, still pass `--verify`. The exporter never holds up stdout: when it
+  falls behind, lines are dropped from the export only, counted on stderr, and
+  show as gaps in `creche.seq` downstream.
 - **Raw** (`-o raw`): the validated wire records unchanged, for consumers that
   decode the creche format themselves (`creche-wire`). Each frame is a
   native-endian `u16` length and the sandbox id, then a native-endian `u32` length
   and that many bytes of whole records. Task records are included, so a consumer
-  can track process context itself.
+  can track process context itself. Frames name the sandbox, not its pod.
 
 ## Working with coding agents
 

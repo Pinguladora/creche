@@ -20,3 +20,16 @@ yamllint = "1.38.0"
 kingfisher = "2.16.0"              # secret scanner (hk)
 "github:sourcefrog/cargo-mutants" = "27.1.0"   # mutation testing (mise run mutants)
 pinact = "5.0.0"                   # pin GitHub Actions to a SHA (hk pre-push)
+"github:rust-fuzz/cargo-fuzz" = "0.13.2"
+
+[tasks.fuzz]
+description = "Fuzz every target for FUZZ_SECONDS (default 60) each, starting from seed inputs"
+# No sanitizer: the crates forbid unsafe, and stable Rust can build it. A crash
+# lands in fuzz/artifacts/<target>/ and `cargo fuzz run <target> <file>` replays it.
+run = """
+cargo run -q --manifest-path fuzz/Cargo.toml --example seeds
+for target in $(cargo fuzz list); do
+  cargo fuzz run -s none -O --target x86_64-unknown-linux-gnu "$target" -- \
+    -max_total_time="${FUZZ_SECONDS:-60}" -max_len=8192 || exit
+done
+"""
