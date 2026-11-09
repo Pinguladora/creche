@@ -20,6 +20,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
+use crate::json::{Attribution, Origin};
+use crate::k8s::{self, Unresolved};
 use crate::peer::{self, Refusal};
 use crate::stream::{Format, StreamDecoder};
 
@@ -35,18 +37,29 @@ const MAX_CONNECTIONS: usize = 4;
 /// Longest sandbox id. containerd ids are at most 76 characters.
 const MAX_ID_LEN: usize = 76;
 
-/// Listens for every sandbox under `dir` on vsock `port`, writing `format` to
-/// stdout, until stdout fails.
+/// How the sink listens.
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// The vsock port the observers connect to.
+    pub port: u32,
+    /// What the sink writes.
+    pub format: Format,
+    /// The container runtime's bundle directory, to find each sandbox's pod.
+    /// `None` skips the lookup.
+    pub bundles: Option<PathBuf>,
+}
+
+/// Listens for every sandbox under `dir`, writing to stdout until it fails.
 ///
 /// # Errors
 ///
 /// When stdout cannot be written.
-pub async fn run(dir: PathBuf, port: u32, format: Format) -> io::Result<()> {
-    run_with(dir, port, format, tokio::io::stdout()).await
+pub async fn run(dir: PathBuf, options: Options) -> io::Result<()> {
+    run_with(dir, options, tokio::io::stdout()).await
 }
 
 /// [`run`], writing to `out`.
-async fn run_with<W>(dir: PathBuf, port: u32, format: Format, out: W) -> io::Result<()>
+async fn run_with<W>(dir: PathBuf, options: Options, out: W) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -57,7 +70,7 @@ where
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while !writer.is_finished() {
         tick.tick().await;
-        scan(&dir, port, format, &mut listeners, &tx).await;
+        scan(&dir, &options, &mut listeners, &tx).await;
     }
     writer.await.unwrap_or_else(|e| Err(io::Error::other(e)))
 }
@@ -78,8 +91,7 @@ impl Drop for Listener {
 /// Starts listeners for new sandboxes and stops the ones whose directory is gone.
 async fn scan(
     dir: &Path,
-    port: u32,
-    format: Format,
+    options: &Options,
     listeners: &mut HashMap<String, Listener>,
     tx: &mpsc::Sender<Vec<u8>>,
 ) {
@@ -103,7 +115,7 @@ async fn scan(
         let Ok(vmm) = tokio::fs::symlink_metadata(&vsock).await else {
             continue;
         };
-        let socket = sandbox.join(format!("clh.sock_{port}"));
+        let socket = sandbox.join(format!("clh.sock_{}", options.port));
         let _ = tokio::fs::remove_file(&socket).await;
         let listener = match UnixListener::bind(&socket) {
             Ok(listener) => listener,
@@ -119,8 +131,9 @@ async fn scan(
         let sandbox = Sandbox {
             id: Arc::from(name.as_str()),
             vsock: Arc::from(vsock),
+            bundles: options.bundles.as_deref().map(Arc::from),
         };
-        let task = tokio::spawn(accept(listener, sandbox, format, tx.clone()));
+        let task = tokio::spawn(accept(listener, sandbox, options.format, tx.clone()));
         listeners.insert(name, Listener { task, socket });
     }
 }
@@ -148,6 +161,8 @@ struct Sandbox {
     id: Arc<str>,
     /// Its VMM's listening vsock socket.
     vsock: Arc<Path>,
+    /// Where to look up its pod.
+    bundles: Option<Arc<Path>>,
 }
 
 async fn accept(
@@ -187,7 +202,7 @@ async fn admit(
         Err(e) => Err(Refusal::from(e)),
     };
     match verdict {
-        Ok(()) => receive(stream, sandbox.id, format, tx).await,
+        Ok(()) => receive(stream, origin(&sandbox).await, format, tx).await,
         Err(refusal) => eprintln!(
             "creche-sink: refusing a connection to {}: {refusal}",
             short(&sandbox.id)
@@ -195,10 +210,31 @@ async fn admit(
     }
 }
 
+/// What the host attests about `sandbox`: its id and, when a bundle directory is
+/// set, the pod the container runtime recorded for it. Looked up once per
+/// connection, so a stream's pod cannot change while it runs.
+async fn origin(sandbox: &Sandbox) -> Origin {
+    let Some(bundles) = sandbox.bundles.clone() else {
+        return Origin::from(&*sandbox.id);
+    };
+    let id = Arc::clone(&sandbox.id);
+    let attribution = tokio::task::spawn_blocking(move || k8s::resolve(&bundles, &id))
+        .await
+        .unwrap_or(Err(Unresolved::Unreadable))
+        .map_or_else(Attribution::Unresolved, Attribution::Pod);
+    if let Attribution::Unresolved(why) = &attribution {
+        eprintln!(
+            "creche-sink: no pod for sandbox {}: {why}",
+            short(&sandbox.id)
+        );
+    }
+    Origin::new(&sandbox.id, &attribution)
+}
+
 /// Decodes one connection until it closes or turns out to be corrupt.
 async fn receive(
     mut stream: UnixStream,
-    sandbox: Arc<str>,
+    origin: Origin,
     format: Format,
     tx: mpsc::Sender<Vec<u8>>,
 ) {
@@ -210,10 +246,10 @@ async fn receive(
             Ok(n) => n,
         };
         let mut lines = Vec::new();
-        if let Err(e) = decoder.feed(chunk.get(..n).unwrap_or_default(), &sandbox, &mut lines) {
+        if let Err(e) = decoder.feed(chunk.get(..n).unwrap_or_default(), &origin, &mut lines) {
             eprintln!(
                 "creche-sink: dropping corrupt stream from {}: {e}",
-                short(&sandbox)
+                short(origin.id())
             );
             break;
         }
@@ -280,6 +316,15 @@ mod tests {
         }
     }
 
+    /// JSON on port 7000, looking up pods under `bundles`.
+    fn options(bundles: Option<&Path>) -> Options {
+        Options {
+            port: 7000,
+            format: Format::Json,
+            bundles: bundles.map(Path::to_path_buf),
+        }
+    }
+
     /// Listens on the sandbox's vsock socket the way its VMM would, which makes
     /// this test process the VMM the sink accepts connections from.
     fn vmm(sandbox: &Path) -> std::os::unix::net::UnixListener {
@@ -308,7 +353,7 @@ mod tests {
         };
         let (tx, rx) = mpsc::channel(8);
         let mut listeners = HashMap::new();
-        scan(tmp.path(), 7000, Format::Json, &mut listeners, &tx).await;
+        scan(tmp.path(), &options(None), &mut listeners, &tx).await;
         assert_eq!(listeners.len(), 1);
         (tmp, vmm, listeners, rx)
     }
@@ -342,11 +387,11 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(8);
             let mut listeners = HashMap::new();
 
-            scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
+            scan(dir, &options(None), &mut listeners, &tx).await;
             assert!(listeners.is_empty(), "no clh.sock yet");
 
             let _vmm = vmm(&sandbox);
-            scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
+            scan(dir, &options(None), &mut listeners, &tx).await;
             assert_eq!(listeners.len(), 1);
             let mode = std::fs::metadata(sandbox.join("clh.sock_7000"))
                 .unwrap()
@@ -364,7 +409,7 @@ mod tests {
             assert_eq!(line["event.name"], "creche.observer.heartbeat");
 
             tokio::fs::remove_dir_all(&sandbox).await.unwrap();
-            scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
+            scan(dir, &options(None), &mut listeners, &tx).await;
             assert!(listeners.is_empty());
         });
     }
@@ -378,7 +423,14 @@ mod tests {
             tokio::fs::create_dir_all(&sandbox).await.unwrap();
             let _vmm = vmm(&sandbox);
             let (out, mut reader) = tokio::io::duplex(64 * 1024);
-            let server = tokio::spawn(run_with(dir.clone(), 7001, Format::Json, out));
+            let server = tokio::spawn(run_with(
+                dir.clone(),
+                Options {
+                    port: 7001,
+                    ..options(None)
+                },
+                out,
+            ));
 
             let socket = sandbox.join("clh.sock_7001");
             within(async {
@@ -404,7 +456,7 @@ mod tests {
         runtime().block_on(async {
             let (tx, mut rx) = mpsc::channel(8);
             let (mut guest, host) = UnixStream::pair().unwrap();
-            let task = tokio::spawn(receive(host, Arc::from("sb"), Format::Json, tx));
+            let task = tokio::spawn(receive(host, Origin::from("sb"), Format::Json, tx));
             let mut bad = heartbeat();
             bad.header.len = 3;
             guest.write_all(bad.as_bytes()).await.unwrap();
@@ -507,8 +559,56 @@ mod tests {
             let _vmm = vmm(&sandbox);
             let (tx, _rx) = mpsc::channel(8);
             let mut listeners = HashMap::new();
-            scan(tmp.path(), 7000, Format::Json, &mut listeners, &tx).await;
+            scan(tmp.path(), &options(None), &mut listeners, &tx).await;
             assert!(listeners.is_empty());
+        });
+    }
+
+    #[test]
+    fn each_connection_names_the_pod_from_the_runtime_bundle() {
+        runtime().block_on(async {
+            let tmp = test_dir();
+            let bundles = tmp.path().join("bundles");
+            let vms = tmp.path().join("vm");
+            for id in ["0123456789abcdef", "fedcba9876543210"] {
+                tokio::fs::create_dir_all(vms.join(id)).await.unwrap();
+            }
+            // Only the first sandbox is a pod.
+            let bundle = bundles.join("0123456789abcdef");
+            std::fs::create_dir_all(&bundle).unwrap();
+            std::fs::set_permissions(&bundle, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(
+                bundle.join("config.json"),
+                r#"{"annotations":{"io.kubernetes.cri.container-type":"sandbox",
+                "io.kubernetes.cri.sandbox-id":"0123456789abcdef",
+                "io.kubernetes.cri.sandbox-name":"agent-7",
+                "io.kubernetes.cri.sandbox-namespace":"agents",
+                "io.kubernetes.cri.sandbox-uid":"1f2e"}}"#,
+            )
+            .unwrap();
+            let _vmms = [
+                vmm(&vms.join("0123456789abcdef")),
+                vmm(&vms.join("fedcba9876543210")),
+            ];
+            let (tx, mut rx) = mpsc::channel(8);
+            let mut listeners = HashMap::new();
+            scan(&vms, &options(Some(&bundles)), &mut listeners, &tx).await;
+            assert_eq!(listeners.len(), 2);
+
+            for (id, pod, unresolved) in [
+                ("0123456789abcdef", "agent-7", serde_json::Value::Null),
+                ("fedcba9876543210", "", "no_bundle".into()),
+            ] {
+                let mut guest = UnixStream::connect(vms.join(id).join("clh.sock_7000"))
+                    .await
+                    .unwrap();
+                guest.write_all(heartbeat().as_bytes()).await.unwrap();
+                let lines = within(rx.recv()).await.unwrap();
+                let line: serde_json::Value = serde_json::from_slice(&lines).unwrap();
+                assert_eq!(line["creche.sandbox.id"], id);
+                assert_eq!(line["k8s.pod.name"].as_str().unwrap_or(""), pod);
+                assert_eq!(line["creche.k8s.unresolved"], unresolved);
+            }
         });
     }
 

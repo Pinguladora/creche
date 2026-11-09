@@ -16,6 +16,7 @@ anyhow = "1.0.104"
 aya = { version = "0.16.0", default-features = false }
 aya-obj = "0.6.0"
 lexopt = "0.3.2"
+miniserde = { version = "0.1.46", default-features = false, features = ["std"] }
 nix = { version = "0.31.3", default-features = false }
 criterion = { version = "0.8.2", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }

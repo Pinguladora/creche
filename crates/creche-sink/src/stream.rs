@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use creche_wire::{Body, DecodeError, Records};
 
-use crate::json;
+use crate::json::{self, Origin};
 use crate::tasks::{TaskInfo, Tasks};
 
 /// What the sink writes for each stream.
@@ -53,10 +53,10 @@ impl StreamDecoder {
     pub fn feed(
         &mut self,
         data: &[u8],
-        sandbox: &str,
+        origin: &Origin,
         out: &mut Vec<u8>,
     ) -> Result<(), DecodeError> {
-        self.feed_at(data, sandbox, now_ns(), out)
+        self.feed_at(data, origin, now_ns(), out)
     }
 
     /// [`StreamDecoder::feed`] with an explicit observed time, in nanoseconds
@@ -68,13 +68,13 @@ impl StreamDecoder {
     pub fn feed_at(
         &mut self,
         data: &[u8],
-        sandbox: &str,
+        origin: &Origin,
         observed_ns: u64,
         out: &mut Vec<u8>,
     ) -> Result<(), DecodeError> {
         let format = self.format;
         if self.pending.is_empty() {
-            let used = write_all(format, data, sandbox, observed_ns, &mut self.tasks, out)?;
+            let used = write_all(format, data, origin, observed_ns, &mut self.tasks, out)?;
             self.pending
                 .extend_from_slice(data.get(used..).unwrap_or_default());
         } else {
@@ -82,7 +82,7 @@ impl StreamDecoder {
             let used = write_all(
                 format,
                 &self.pending,
-                sandbox,
+                origin,
                 observed_ns,
                 &mut self.tasks,
                 out,
@@ -110,14 +110,14 @@ fn now_ns() -> u64 {
 fn write_all(
     format: Format,
     buf: &[u8],
-    sandbox: &str,
+    origin: &Origin,
     observed_ns: u64,
     tasks: &mut Tasks,
     out: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
     match format {
-        Format::Json => render_all(buf, sandbox, observed_ns, tasks, out),
-        Format::Raw => frame_all(buf, sandbox, out),
+        Format::Json => render_all(buf, origin, observed_ns, tasks, out),
+        Format::Raw => frame_all(buf, origin.id(), out),
     }
 }
 
@@ -125,7 +125,7 @@ fn write_all(
 /// they took. Task records update the process contexts instead of being rendered.
 fn render_all(
     buf: &[u8],
-    sandbox: &str,
+    origin: &Origin,
     observed_ns: u64,
     tasks: &mut Tasks,
     out: &mut Vec<u8>,
@@ -138,17 +138,17 @@ fn render_all(
             Body::Task { context, cgroup } => tasks.set(pid, TaskInfo::new(&context, cgroup)),
             Body::Exec { context, .. } => {
                 tasks.exec(pid, &context);
-                json::render(sandbox, &record, tasks.get(pid), observed_ns, out);
+                json::render(origin, &record, tasks.get(pid), observed_ns, out);
             }
             Body::Fork { ppid } => {
                 tasks.fork(ppid, pid);
-                json::render(sandbox, &record, tasks.get(pid), observed_ns, out);
+                json::render(origin, &record, tasks.get(pid), observed_ns, out);
             }
             Body::Exit { .. } => {
-                json::render(sandbox, &record, tasks.get(pid), observed_ns, out);
+                json::render(origin, &record, tasks.get(pid), observed_ns, out);
                 tasks.exit(pid);
             }
-            _ => json::render(sandbox, &record, tasks.get(pid), observed_ns, out),
+            _ => json::render(origin, &record, tasks.get(pid), observed_ns, out),
         }
     }
     Ok(records.consumed())
@@ -206,7 +206,7 @@ mod tests {
     fn whole_stream_at_once() {
         let mut d = StreamDecoder::default();
         let mut out = Vec::new();
-        d.feed_at(&stream(3), "sb", 7, &mut out).unwrap();
+        d.feed_at(&stream(3), &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(std::str::from_utf8(&out).unwrap().lines().count(), 3);
         assert_eq!(d.pending(), 0);
     }
@@ -216,10 +216,10 @@ mod tests {
         let mut d = StreamDecoder::default();
         let mut out = Vec::new();
         let rec = heartbeat(1);
-        d.feed_at(&rec[..10], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[..10], &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(d.pending(), 10);
         assert_eq!(out, b"");
-        d.feed_at(&rec[10..], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[10..], &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(d.pending(), 0);
         assert_ne!(out, b"");
     }
@@ -230,7 +230,7 @@ mod tests {
         bad[2..4].copy_from_slice(&3_u16.to_ne_bytes());
         let mut out = Vec::new();
         assert_eq!(
-            StreamDecoder::default().feed_at(&bad, "sb", 7, &mut out),
+            StreamDecoder::default().feed_at(&bad, &"sb".into(), 7, &mut out),
             Err(DecodeError::BadLength { len: 3 })
         );
     }
@@ -240,10 +240,10 @@ mod tests {
         let mut d = StreamDecoder::default();
         let mut out = Vec::new();
         let rec = heartbeat(1);
-        d.feed_at(&rec[..10], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[..10], &"sb".into(), 7, &mut out).unwrap();
         let mut rest = rec[10..].to_vec();
         rest.extend_from_slice(&[0xff; 60]);
-        assert!(d.feed_at(&rest, "sb", 7, &mut out).is_err());
+        assert!(d.feed_at(&rest, &"sb".into(), 7, &mut out).is_err());
     }
 
     /// A record of `kind` for `pid` with `body` after the header.
@@ -308,7 +308,7 @@ mod tests {
         .concat();
         let mut out = Vec::new();
         StreamDecoder::default()
-            .feed_at(&data, "sb", 7, &mut out)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
             .unwrap();
         let l = lines(&out);
         let summary: Vec<_> = l
@@ -349,7 +349,7 @@ mod tests {
         let before = now_ns();
         let mut out = Vec::new();
         StreamDecoder::default()
-            .feed(&heartbeat(1), "sb", &mut out)
+            .feed(&heartbeat(1), &"sb".into(), &mut out)
             .unwrap();
         let after = now_ns();
         let line: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -379,8 +379,10 @@ mod tests {
         let mut d = StreamDecoder::new(Format::Raw);
         let mut out = Vec::new();
         // The first chunk ends inside the second record: only the first is framed.
-        d.feed_at(&data[..100], "sb-1", 7, &mut out).unwrap();
-        d.feed_at(&data[100..], "sb-1", 7, &mut out).unwrap();
+        d.feed_at(&data[..100], &"sb-1".into(), 7, &mut out)
+            .unwrap();
+        d.feed_at(&data[100..], &"sb-1".into(), 7, &mut out)
+            .unwrap();
         let got = frames(&out);
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|(id, _)| id == "sb-1"));
@@ -394,13 +396,13 @@ mod tests {
         let rec = heartbeat(1);
         let mut d = StreamDecoder::new(Format::Raw);
         let mut out = Vec::new();
-        d.feed_at(&rec[..10], "sb", 7, &mut out).unwrap();
+        d.feed_at(&rec[..10], &"sb".into(), 7, &mut out).unwrap();
         assert_eq!(out, b"");
         let mut bad = heartbeat(1);
         bad[2..4].copy_from_slice(&3_u16.to_ne_bytes());
         assert!(
             StreamDecoder::new(Format::Raw)
-                .feed_at(&bad, "sb", 7, &mut out)
+                .feed_at(&bad, &"sb".into(), 7, &mut out)
                 .is_err()
         );
         assert_eq!(out, b"");
@@ -418,7 +420,7 @@ mod tests {
             let mut out = Vec::new();
             let mut start = 0;
             for end in offsets.into_iter().chain([data.len()]) {
-                d.feed_at(&data[start..end], "sb", 7, &mut out).unwrap();
+                d.feed_at(&data[start..end], &"sb".into(), 7, &mut out).unwrap();
                 start = end;
             }
             let mut joined = Vec::new();
@@ -441,7 +443,7 @@ mod tests {
         fn chunking_does_not_change_the_output(count in 0_u64..20, cuts in proptest::collection::vec(any::<prop::sample::Index>(), 0..10)) {
             let data = stream(count);
             let mut whole = Vec::new();
-            StreamDecoder::default().feed_at(&data, "sb", 7, &mut whole).unwrap();
+            StreamDecoder::default().feed_at(&data, &"sb".into(), 7, &mut whole).unwrap();
 
             let mut offsets: Vec<usize> = cuts.iter().map(|i| i.index(data.len() + 1)).collect();
             offsets.sort_unstable();
@@ -449,7 +451,7 @@ mod tests {
             let mut chunked = Vec::new();
             let mut start = 0;
             for end in offsets.into_iter().chain([data.len()]) {
-                d.feed_at(&data[start..end], "sb", 7, &mut chunked).unwrap();
+                d.feed_at(&data[start..end], &"sb".into(), 7, &mut chunked).unwrap();
                 start = end;
             }
             prop_assert_eq!(chunked, whole);
