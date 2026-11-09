@@ -81,6 +81,22 @@ impl StreamDecoder {
         self
     }
 
+    /// Also keeps an audit chain, signed with keys that start from one `svid`
+    /// vouches for. Returns the fields the stream's start line must carry.
+    ///
+    /// # Errors
+    ///
+    /// When the system's random source cannot be read.
+    pub fn with_signed_audit(
+        mut self,
+        stream: &str,
+        svid: &crate::spiffe::Svid,
+    ) -> std::io::Result<(Self, Vec<(&'static str, String)>)> {
+        let (chain, fields) = Chain::signed(stream, svid)?;
+        self.chain = Some(chain);
+        Ok((self, fields))
+    }
+
     /// Writes an event the sink reports about this stream, such as its start or
     /// end, as the stream's next line. Nothing in the raw format.
     pub fn event(
@@ -571,7 +587,7 @@ mod tests {
             panic!("{checkpoints:?}");
         };
         assert!(cut >= 255 && next == cut + 1, "{checkpoints:?}");
-        let report = crate::audit::verify(&out);
+        let report = crate::audit::verify(&out, None);
         assert!(report.intact(), "{report:?}");
         assert_eq!(report.streams["s1"].verified, 302);
     }

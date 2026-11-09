@@ -58,7 +58,7 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   sandbox's OCI spec from containerd's root-only bundle directory and takes the
   pod's name, namespace and uid from the annotations containerd sets from
   kubelet's request. The spec must name the same sandbox and be a sandbox's, and
-  the bundle must be private to root or the sink's user. Otherwise every line says
+  the bundle must be owned by root and private to it. Otherwise every line says
   why the pod is unknown, and nothing is guessed.
 - **The container is the guest's claim, checked.** A process's guest cgroup
   (`cri-containerd-<id>.scope`) claims a container. The sink reports it as
@@ -139,6 +139,8 @@ creche-sink -o raw              # the records unchanged, in frames naming their 
 creche-sink -b /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io   # k3s keeps containerd's state here
 creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
 creche-sink --verify out.jsonl  # check the audit chains in saved output
+creche-sink --spiffe-socket /run/spire/agent.sock   # sign every stream with the sink's SVID
+creche-sink --verify out.jsonl --bundle bundle.pem --spiffe-id spiffe://example.org/creche-sink
 creche-sink --otlp http://127.0.0.1:4317 > archive.jsonl   # export to a node collector, keep an archive
 ```
 
@@ -180,6 +182,17 @@ the pipelines they already feed.
   output. Refused connections are `creche.sink.refused` lines, outside any stream,
   with the peer and `creche.sink.refusal`. The chain proves integrity only as far
   as its checkpoints are kept out of reach, for example shipped to a second store.
+- **Signed streams** (`--spiffe-socket PATH`): the sink takes its X.509-SVID from
+  the SPIFFE Workload API. Each stream starts with a fresh P-256 key whose public
+  half (`creche.audit.key`) the SVID signs (`creche.audit.key_sig`, with the SVID
+  chain in `creche.audit.svid`). Every checkpoint is signed by the stream's current
+  key (`creche.audit.sig`) and names the next one (`creche.audit.next_key`),
+  derived from the current key and the checkpoint hash, and the current key is
+  then erased. Whoever takes over the sink later cannot sign earlier checkpoints
+  again. `creche-sink --verify FILE --bundle bundle.pem --spiffe-id ID` checks that
+  every stream is signed by one of the given sink SPIFFE IDs, with an SVID that
+  chained to the trust bundle at the stream's start. The IDs are required: any
+  other workload in the trust domain has an SVID too.
 - **OpenTelemetry logs** (`--otlp URL`, with JSON output): the same lines,
   also exported to a collector as OTLP over gRPC (`--otlp-protocol grpc`, the
   default, port 4317) or OTLP/HTTP (`--otlp-protocol http`, port 4318), protobuf

@@ -19,15 +19,19 @@ bench = false
 [dependencies]
 creche-wire.workspace = true
 anyhow.workspace = true
+base64ct.workspace = true
 bytes.workspace = true
 h2.workspace = true
 http.workspace = true
 lexopt.workspace = true
+p256.workspace = true
 prost.workspace = true
 ruzstd.workspace = true
 miniserde.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "rt", "sync", "time"] }
+x509-cert.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 creche-wire = { workspace = true, features = ["sample"] }

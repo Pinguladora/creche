@@ -18,13 +18,14 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::json::{Attribution, Origin, Value, sink_event};
 use crate::k8s::{self, Containers, Unresolved};
 use crate::otlp::{self, Batch, Endpoint};
 use crate::peer::{self, Refusal};
+use crate::spiffe::{self, Svid};
 use crate::stream::{Format, StreamDecoder, now_ns};
 
 /// How often sandbox directories are rescanned.
@@ -56,6 +57,22 @@ pub struct Options {
     pub bundles: Option<PathBuf>,
     /// Where to export the JSON lines as OpenTelemetry logs, besides stdout.
     pub otlp: Option<Endpoint>,
+    /// The SPIFFE Workload API socket, to sign each stream's audit chain.
+    pub spiffe: Option<PathBuf>,
+}
+
+/// The sink's current X.509-SVID, kept up to date from the Workload API.
+type SvidWatch = watch::Receiver<Option<Arc<Svid>>>;
+
+/// How a new stream's audit chain is signed.
+#[derive(Clone, Debug)]
+enum Signing {
+    /// Not signed: no Workload API is configured.
+    Off,
+    /// Should be signed, but the Workload API has not yet sent an SVID.
+    Waiting,
+    /// Signed with this SVID.
+    With(Arc<Svid>),
 }
 
 /// Listens for every sandbox under `dir`, writing to stdout until it fails.
@@ -80,12 +97,17 @@ where
         otx
     });
     let writer = tokio::spawn(write_output(rx, out, exporter));
+    let svid = options.spiffe.clone().map(|socket| {
+        let (stx, srx) = watch::channel(None);
+        tokio::spawn(spiffe::watch(socket, stx));
+        srx
+    });
     let mut listeners: HashMap<String, Listener> = HashMap::new();
     let mut tick = tokio::time::interval(SCAN_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while !writer.is_finished() {
         tick.tick().await;
-        scan(&dir, &options, &mut listeners, &tx).await;
+        scan(&dir, &options, svid.as_ref(), &mut listeners, &tx).await;
     }
     writer.await.unwrap_or_else(|e| Err(io::Error::other(e)))
 }
@@ -107,6 +129,7 @@ impl Drop for Listener {
 async fn scan(
     dir: &Path,
     options: &Options,
+    svid: Option<&SvidWatch>,
     listeners: &mut HashMap<String, Listener>,
     tx: &mpsc::Sender<Batch>,
 ) {
@@ -147,6 +170,7 @@ async fn scan(
             id: Arc::from(name.as_str()),
             vsock: Arc::from(vsock),
             bundles: options.bundles.as_deref().map(Arc::from),
+            svid: svid.cloned(),
         };
         let task = tokio::spawn(accept(listener, sandbox, options.format, tx.clone()));
         listeners.insert(name, Listener { task, socket });
@@ -178,6 +202,8 @@ struct Sandbox {
     vsock: Arc<Path>,
     /// Where to look up its pod.
     bundles: Option<Arc<Path>>,
+    /// The SVID to sign its streams with, when signing.
+    svid: Option<SvidWatch>,
 }
 
 async fn accept(listener: UnixListener, sandbox: Sandbox, format: Format, tx: mpsc::Sender<Batch>) {
@@ -220,7 +246,14 @@ async fn admit(
     match verdict {
         Ok(()) => {
             let (origin, containers) = origin(&sandbox).await;
-            receive(stream, origin, containers, peer, format, tx).await;
+            let signing = match &sandbox.svid {
+                None => Signing::Off,
+                Some(svid) => svid
+                    .borrow()
+                    .clone()
+                    .map_or(Signing::Waiting, Signing::With),
+            };
+            receive(stream, origin, containers, peer, signing, format, tx).await;
         }
         Err(refusal) => refused(&sandbox.id, &refusal.to_string(), peer, format, &tx).await,
     }
@@ -328,28 +361,39 @@ async fn receive(
     origin: Origin,
     containers: Option<Containers>,
     peer: Peer,
+    signing: Signing,
     format: Format,
     tx: mpsc::Sender<Batch>,
 ) {
-    let origin = Arc::new(origin.with_stream(&stream_id()));
+    let id = stream_id();
+    let origin = Arc::new(origin.with_stream(&id));
     let batch = |observed_ns, lines| Batch {
         origin: Arc::clone(&origin),
         observed_ns,
         lines,
     };
-    let mut decoder = StreamDecoder::new(format).with_audit();
+    let (mut decoder, signed) = match &signing {
+        Signing::With(svid) => match StreamDecoder::new(format).with_signed_audit(&id, svid) {
+            Ok(signed) => signed,
+            Err(e) => {
+                eprintln!("creche-sink: stream {id} is not signed: {e}");
+                (StreamDecoder::new(format).with_audit(), Vec::new())
+            }
+        },
+        Signing::Waiting => {
+            eprintln!("creche-sink: no SVID yet, stream {id} is not signed");
+            (StreamDecoder::new(format).with_audit(), Vec::new())
+        }
+        Signing::Off => (StreamDecoder::new(format).with_audit(), Vec::new()),
+    };
     if let Some(containers) = containers {
         decoder = decoder.with_containers(containers);
     }
+    let mut fields = peer.fields();
+    fields.extend(signed.iter().map(|(k, v)| (*k, Value::Str(v))));
     let mut lines = Vec::new();
     let now = now_ns();
-    decoder.event(
-        &origin,
-        "creche.stream.start",
-        now,
-        &peer.fields(),
-        &mut lines,
-    );
+    decoder.event(&origin, "creche.stream.start", now, &fields, &mut lines);
     if !lines.is_empty() && tx.send(batch(now, lines)).await.is_err() {
         return;
     }
@@ -495,6 +539,7 @@ mod tests {
             format: Format::Json,
             bundles: bundles.map(Path::to_path_buf),
             otlp: None,
+            spiffe: None,
         }
     }
 
@@ -526,7 +571,7 @@ mod tests {
         };
         let (tx, rx) = mpsc::channel(8);
         let mut listeners = HashMap::new();
-        scan(tmp.path(), &options(None), &mut listeners, &tx).await;
+        scan(tmp.path(), &options(None), None, &mut listeners, &tx).await;
         assert_eq!(listeners.len(), 1);
         (tmp, vmm, listeners, rx)
     }
@@ -576,11 +621,11 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(8);
             let mut listeners = HashMap::new();
 
-            scan(dir, &options(None), &mut listeners, &tx).await;
+            scan(dir, &options(None), None, &mut listeners, &tx).await;
             assert!(listeners.is_empty(), "no clh.sock yet");
 
             let _vmm = vmm(&sandbox);
-            scan(dir, &options(None), &mut listeners, &tx).await;
+            scan(dir, &options(None), None, &mut listeners, &tx).await;
             assert_eq!(listeners.len(), 1);
             let mode = std::fs::metadata(sandbox.join("clh.sock_7000"))
                 .unwrap()
@@ -597,7 +642,7 @@ mod tests {
             assert_eq!(line["event.name"], "creche.observer.heartbeat");
 
             tokio::fs::remove_dir_all(&sandbox).await.unwrap();
-            scan(dir, &options(None), &mut listeners, &tx).await;
+            scan(dir, &options(None), None, &mut listeners, &tx).await;
             assert!(listeners.is_empty());
         });
     }
@@ -652,6 +697,7 @@ mod tests {
                     pid: None,
                     uid: None,
                 },
+                Signing::Off,
                 Format::Json,
                 tx,
             ));
@@ -685,7 +731,7 @@ mod tests {
                     "\"creche.audit.checkpoint\" null",
                 ]
             );
-            let report = crate::audit::verify(&output);
+            let report = crate::audit::verify(&output, None);
             assert!(report.intact(), "{report:?}");
             assert!(report.streams.values().all(|s| s.ended && s.verified == 3));
         });
@@ -804,7 +850,7 @@ mod tests {
             let _vmm = vmm(&sandbox);
             let (tx, _rx) = mpsc::channel(8);
             let mut listeners = HashMap::new();
-            scan(tmp.path(), &options(None), &mut listeners, &tx).await;
+            scan(tmp.path(), &options(None), None, &mut listeners, &tx).await;
             assert!(listeners.is_empty());
         });
     }
@@ -837,7 +883,7 @@ mod tests {
             ];
             let (tx, mut rx) = mpsc::channel(8);
             let mut listeners = HashMap::new();
-            scan(&vms, &options(Some(&bundles)), &mut listeners, &tx).await;
+            scan(&vms, &options(Some(&bundles)), None, &mut listeners, &tx).await;
             assert_eq!(listeners.len(), 2);
 
             for (id, pod, unresolved) in [
@@ -914,6 +960,69 @@ mod tests {
                 assert_eq!(dropped.lines, 3);
                 assert_eq!(dropped.reported, start + DROP_REPORT, "reported");
             });
+    }
+
+    /// Runs one stream of two heartbeats through `receive` with `signing`.
+    async fn one_stream(signing: Signing) -> Vec<u8> {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (mut guest, host) = UnixStream::pair().unwrap();
+        let peer = Peer {
+            pid: None,
+            uid: None,
+        };
+        let task = tokio::spawn(receive(
+            host,
+            Origin::from("sb"),
+            None,
+            peer,
+            signing,
+            Format::Json,
+            tx,
+        ));
+        guest
+            .write_all(&[heartbeat().as_bytes(), heartbeat().as_bytes()].concat())
+            .await
+            .unwrap();
+        drop(guest);
+        within(task).await.unwrap();
+        let mut output = Vec::new();
+        while let Ok(batch) = rx.try_recv() {
+            output.extend(batch.lines);
+        }
+        output
+    }
+
+    #[test]
+    fn streams_are_signed_with_the_current_svid_when_there_is_one() {
+        runtime().block_on(async {
+            let svid = Svid::from_der(
+                "spiffe://creche.test/sink",
+                include_bytes!("../tests/fixtures/spiffe/sink.der"),
+                include_bytes!("../tests/fixtures/spiffe/sink.key.der"),
+            )
+            .unwrap();
+            let bundle = crate::audit::Trust {
+                bundle: spiffe::TrustBundle::from_pem(include_bytes!(
+                    "../tests/fixtures/spiffe/bundle.pem"
+                ))
+                .unwrap(),
+                sinks: vec!["spiffe://creche.test/sink".to_owned()],
+            };
+            let signed = one_stream(Signing::With(Arc::new(svid))).await;
+            // The fixtures are valid from 2026, so this holds while the clock does.
+            let report = crate::audit::verify(&signed, Some(&bundle));
+            assert!(report.intact(), "{report:?}");
+            let s = report.streams.values().next().unwrap();
+            assert_eq!(s.signer.as_deref(), Some("spiffe://creche.test/sink"));
+            assert!(s.trusted && s.ended && s.verified == 4);
+
+            // Waiting for an SVID: the stream runs, unsigned.
+            let unsigned = one_stream(Signing::Waiting).await;
+            assert!(crate::audit::verify(&unsigned, None).intact());
+            let report = crate::audit::verify(&unsigned, Some(&bundle));
+            let s = report.streams.values().next().unwrap();
+            assert_eq!(s.problems, ["the stream is not signed"]);
+        });
     }
 
     #[test]

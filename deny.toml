@@ -15,6 +15,11 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
+# subtle (constant-time primitives) sits under every RustCrypto elliptic curve,
+# p256 included, and is BSD-3-Clause. Allowed for that crate only.
+exceptions = [
+    { crate = "subtle", allow = ["BSD-3-Clause"] },
+]
 
 [bans]
 multiple-versions = "warn"
