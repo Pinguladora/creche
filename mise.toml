@@ -33,6 +33,7 @@ cargo-deny = "0.20.2"
 cocogitto = "7.0.0"
 zizmor = "1.30.1"
 jactionlint = { version = "2.4.0", workflow = "release.yaml" }
+trivy = "0.76.1"
 
 [tasks.test]
 description = "Unit, property and doc tests, then again with debug assertions on a release build"
@@ -65,3 +66,7 @@ run = [
 ]
 description = "Lint and security-audit the GitHub Actions workflows (jactionlint + zizmor)"
 sources = [".github/workflows/**", ".github/zizmor.yml"]
+
+[tasks."scan:trivy"]
+description = "Scan for vulnerabilities, misconfigurations and licences with Trivy (report only)"
+run = "trivy fs --config trivy.yaml ."

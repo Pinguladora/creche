@@ -20,3 +20,7 @@ perf.data.old
 
 # Release tarballs and checksums from `mise run release:build`.
 /dist
+
+# Trivy's database cache and the SARIF report CI uploads.
+/.cache
+/trivy-results.sarif

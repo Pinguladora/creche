@@ -24,6 +24,10 @@ description = "Full CI gate: format, clippy, cargo-deny, then the tests (which b
 depends = ["ci:fmt", "ci:clippy", "ci:deny"]
 run = "mise run test"
 
+[tasks."ci:trivy"]
+description = "Trivy scan as SARIF for code scanning, failing on HIGH or CRITICAL findings"
+run = "trivy fs --config trivy.yaml --format sarif --output trivy-results.sarif --exit-code 1 ."
+
 [tasks."release:security-check"]
 description = "Exit 0 when a commit since the last tag carries a [security] marker"
 run = '''
