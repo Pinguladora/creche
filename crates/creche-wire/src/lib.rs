@@ -7,9 +7,11 @@
 //! again whenever it changes, and exec records carry it too. A reader keeps it
 //! per pid, copies it from parent to child on fork, updates it on exec and drops
 //! it on exit.
+//! A [`CgroupPrefix`] record describes a cgroup, by id, before the first task
+//! or exec record in it: its path and the labels its owner set on it.
 //! Most records are produced by the guest kernel (the BPF ring buffer records are
-//! the wire format, see `crates/creche-observer/bpf/observer.bpf.c`). Hello and
-//! heartbeat records are produced by the observer itself. Fields are native-endian:
+//! the wire format, see `crates/creche-observer/bpf/observer.bpf.c`). Hello,
+//! heartbeat and cgroup records are produced by the observer itself. Fields are native-endian:
 //! the guest and the host share the architecture.
 //!
 //! Memory profile: allocation-free. Decoding borrows from the input buffer.
@@ -35,6 +37,17 @@ pub const PATH_LEN: usize = 256;
 pub const ARGS_LEN: usize = 512;
 /// Maximum length of a cgroup leaf name in a task record.
 pub const CGROUP_LEN: usize = 96;
+/// Longest cgroup path in a cgroup record, from the cgroup v2 root.
+pub const CGROUP_PATH_LEN: usize = 512;
+/// Most labels in a cgroup record.
+pub const MAX_LABELS: usize = 8;
+/// Longest label key: the part of a `user.creche.agent.<key>` xattr name after
+/// the prefix.
+pub const LABEL_KEY_LEN: usize = 32;
+/// Longest label value.
+pub const LABEL_VALUE_LEN: usize = 128;
+/// Room for labels in a cgroup record, each a key and a value, NUL-terminated.
+pub const LABELS_LEN: usize = MAX_LABELS * (LABEL_KEY_LEN + LABEL_VALUE_LEN + 2);
 /// Upper bound on a record length. Anything larger means the stream is corrupt.
 pub const MAX_RECORD_LEN: usize = 4096;
 
@@ -60,6 +73,8 @@ pub enum Kind {
     Hello,
     /// Periodic liveness and self-cost report, from the observer.
     Heartbeat,
+    /// A cgroup's path and labels, from the observer.
+    Cgroup,
 }
 
 impl Kind {
@@ -75,6 +90,7 @@ impl Kind {
             Self::Task => 6,
             Self::Hello => 100,
             Self::Heartbeat => 101,
+            Self::Cgroup => 102,
         }
     }
 
@@ -90,6 +106,7 @@ impl Kind {
             6 => Self::Task,
             100 => Self::Hello,
             101 => Self::Heartbeat,
+            102 => Self::Cgroup,
             _ => return None,
         })
     }
@@ -216,6 +233,144 @@ pub struct HelloRecord {
     pub flags: HelloFlags,
 }
 
+/// The fixed part of a cgroup record, sent by the observer before the first
+/// task or exec record of a process in a cgroup it has not described on this
+/// connection. The cgroup's path follows, then its labels.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct CgroupPrefix {
+    /// Common header. `pid` is the observer's.
+    pub header: Header,
+    /// cgroup v2 id, as in task and exec records.
+    pub cgroup_id: u64,
+    /// Owner of the cgroup the labels were read from, the cgroup itself or its
+    /// nearest labelled ancestor, or of the cgroup itself without labels. Only
+    /// the owner, or a process that may bypass file permissions, can set them.
+    pub owner_uid: u32,
+    /// Bytes of path, from the cgroup v2 root, without a NUL.
+    pub path_len: u16,
+    /// Bytes of labels after the path: each a key and a value, NUL-terminated.
+    pub labels_len: u16,
+}
+
+/// Writes a cgroup record into `out` and returns its length, or `None` when a
+/// field is out of bounds or `out` is too short. `labels` are key and value
+/// pairs, checked as a decoder would.
+#[must_use]
+pub fn encode_cgroup(
+    pid: u32,
+    ts_ns: u64,
+    cgroup_id: u64,
+    owner_uid: u32,
+    path: &[u8],
+    labels: &[(&[u8], &[u8])],
+    out: &mut [u8],
+) -> Option<usize> {
+    let labels_len = labels.iter().try_fold(0_usize, |sum, (key, value)| {
+        (label_key_ok(key) && label_value_ok(value)).then(|| {
+            sum.checked_add(key.len())?
+                .checked_add(value.len())?
+                .checked_add(2)
+        })?
+    })?;
+    if path.len() > CGROUP_PATH_LEN || path.contains(&0) || labels.len() > MAX_LABELS {
+        return None;
+    }
+    let len = size_of::<CgroupPrefix>()
+        .checked_add(path.len())?
+        .checked_add(labels_len)?;
+    let prefix = CgroupPrefix {
+        header: Header::for_observer(Kind::Cgroup, u16::try_from(len).ok()?, pid, ts_ns),
+        cgroup_id,
+        owner_uid,
+        path_len: u16::try_from(path.len()).ok()?,
+        labels_len: u16::try_from(labels_len).ok()?,
+    };
+    let mut rest = out.get_mut(..len)?;
+    for part in [prefix.as_bytes(), path]
+        .into_iter()
+        .chain(labels.iter().flat_map(|(k, v)| [*k, b"\0", *v, b"\0"]))
+    {
+        let (head, tail) = rest.split_at_mut_checked(part.len())?;
+        head.copy_from_slice(part);
+        rest = tail;
+    }
+    Some(len)
+}
+
+/// Whether `key` may name a label: 1 to [`LABEL_KEY_LEN`] bytes of lowercase
+/// letters, digits, `_`, `-` and `.`, starting and ending with a letter or digit.
+#[must_use]
+pub fn label_key_ok(key: &[u8]) -> bool {
+    let alnum = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    (1..=LABEL_KEY_LEN).contains(&key.len())
+        && key.first().is_some_and(alnum)
+        && key.last().is_some_and(alnum)
+        && key
+            .iter()
+            .all(|b| alnum(b) || matches!(b, b'_' | b'-' | b'.'))
+}
+
+/// Whether `value` may be a label's value: at most [`LABEL_VALUE_LEN`] bytes of
+/// UTF-8 without control characters.
+#[must_use]
+pub fn label_value_ok(value: &[u8]) -> bool {
+    value.len() <= LABEL_VALUE_LEN
+        && core::str::from_utf8(value).is_ok_and(|v| !v.chars().any(char::is_control))
+}
+
+/// A cgroup's labels, checked: key and value pairs, each NUL-terminated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Labels<'a>(&'a [u8]);
+
+impl<'a> Labels<'a> {
+    /// `bytes` as labels, `None` unless every key and value is valid and there
+    /// are at most [`MAX_LABELS`].
+    fn parse(bytes: &'a [u8]) -> Option<Self> {
+        let Some(body) = bytes.strip_suffix(b"\0") else {
+            return bytes.is_empty().then_some(Self(bytes));
+        };
+        let mut fields = body.split(|&b| b == 0);
+        let mut count = 0_usize;
+        while let Some(key) = fields.next() {
+            let value = fields.next()?;
+            count = count.checked_add(1)?;
+            if count > MAX_LABELS || !label_key_ok(key) || !label_value_ok(value) {
+                return None;
+            }
+        }
+        Some(Self(bytes))
+    }
+
+    /// Whether there are none.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The labels, as key and value pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        let body = self.0.strip_suffix(b"\0").unwrap_or_default();
+        let mut fields = body
+            .split(|&b| b == 0)
+            .filter(|_| !body.is_empty())
+            .map(|f| core::str::from_utf8(f).unwrap_or_default());
+        core::iter::from_fn(move || Some((fields.next()?, fields.next()?)))
+    }
+}
+
+/// The cgroup id of a task or exec record, read from its context without
+/// decoding the rest. `None` for other kinds or a record cut short.
+#[must_use]
+pub fn peek_cgroup_id(record: &[u8]) -> Option<u64> {
+    let (prefix, _) = ContextPrefix::read_from_prefix(record).ok()?;
+    matches!(
+        Kind::from_code(prefix.header.kind),
+        Some(Kind::Task | Kind::Exec)
+    )
+    .then_some(prefix.cgroup_id)
+}
+
 /// Observer configuration reported in the hello record.
 #[repr(transparent)]
 #[derive(
@@ -323,6 +478,8 @@ const _: () = {
     assert!(size_of::<ExecRecord>() == 824);
     assert!(size_of::<HelloRecord>() == 24);
     assert!(size_of::<HeartbeatRecord>() == 72);
+    assert!(size_of::<CgroupPrefix>() == 32);
+    assert!(size_of::<CgroupPrefix>() + CGROUP_PATH_LEN + LABELS_LEN <= MAX_RECORD_LEN);
     assert!(offset_of!(TaskRecord, cgroup) == 48);
     assert!(offset_of!(OpenRecord, path) == 20);
     assert!(offset_of!(ExecRecord, comm) == offset_of!(TaskRecord, comm));
@@ -431,6 +588,17 @@ pub enum Body<'a> {
     },
     /// See [`HeartbeatRecord`].
     Heartbeat(HeartbeatRecord),
+    /// See [`CgroupPrefix`].
+    Cgroup {
+        /// cgroup v2 id.
+        cgroup_id: u64,
+        /// Owner of the cgroup the labels were read from.
+        owner_uid: u32,
+        /// Path from the cgroup v2 root.
+        path: &'a [u8],
+        /// Labels its owner set on it, under `user.creche.agent.`.
+        labels: Labels<'a>,
+    },
     /// A kind this decoder does not know, skipped by its length.
     Unknown {
         /// The record bytes after the header.
@@ -616,6 +784,35 @@ fn decode_body(kind: Kind, header: Header, rec: &[u8]) -> Result<Body<'_>, Decod
             let (hb, _) = HeartbeatRecord::read_from_prefix(rec).map_err(|_| truncated)?;
             Body::Heartbeat(hb)
         }
+        Kind::Cgroup => {
+            if rec.len() < size_of::<CgroupPrefix>() {
+                return Err(truncated);
+            }
+            decode_cgroup(rec).ok_or(bad_field)?
+        }
+    })
+}
+
+/// The body of a cgroup record, `None` if it is cut short or a field is out of
+/// bounds.
+fn decode_cgroup(rec: &[u8]) -> Option<Body<'_>> {
+    let (c, data) = CgroupPrefix::read_from_prefix(rec).ok()?;
+    let path_len = usize::from(c.path_len);
+    let labels_len = usize::from(c.labels_len);
+    // The record ends right after the labels, so the lengths add up. Labels
+    // longer than LABELS_LEN cannot parse, so only the path needs a bound.
+    if path_len > CGROUP_PATH_LEN || path_len.checked_add(labels_len) != Some(data.len()) {
+        return None;
+    }
+    let (path, labels) = data.split_at_checked(path_len)?;
+    if path.contains(&0) {
+        return None;
+    }
+    Some(Body::Cgroup {
+        cgroup_id: c.cgroup_id,
+        owner_uid: c.owner_uid,
+        path,
+        labels: Labels::parse(labels)?,
     })
 }
 

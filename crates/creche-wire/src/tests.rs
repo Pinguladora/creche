@@ -45,6 +45,7 @@ fn kind_codes_round_trip() {
         Kind::Task,
         Kind::Hello,
         Kind::Heartbeat,
+        Kind::Cgroup,
     ] {
         assert_eq!(Kind::from_code(kind.code()), Some(kind));
     }
@@ -427,6 +428,165 @@ fn flags_combine_idempotently() {
     assert!(!HelloFlags::DEDUP.contains(HelloFlags::PROCESS_ONLY));
 }
 
+/// A cgroup record, encoded as the observer does.
+fn cgroup(path: &[u8], labels: &[(&[u8], &[u8])]) -> Option<Vec<u8>> {
+    let mut out = vec![0; MAX_RECORD_LEN];
+    let len = encode_cgroup(42, 7, 9, 1000, path, labels, &mut out)?;
+    out.truncate(len);
+    Some(out)
+}
+
+#[test]
+fn cgroup_records_carry_path_owner_and_labels() {
+    let rec = cgroup(
+        b"/kubepods/pod1/cri-containerd-x.scope/planner",
+        &[(b"name", b"planner"), (b"session.id", b"s-1 \xc3\xa9")],
+    )
+    .unwrap();
+    let decoded = decode_one(&rec);
+    assert_eq!(decoded.header, header(Kind::Cgroup.code(), rec.len()));
+    let Body::Cgroup {
+        cgroup_id,
+        owner_uid,
+        path,
+        labels,
+    } = decoded.body
+    else {
+        panic!("{decoded:?}");
+    };
+    assert_eq!((cgroup_id, owner_uid), (9, 1000));
+    assert_eq!(path, b"/kubepods/pod1/cri-containerd-x.scope/planner");
+    assert!(!labels.is_empty());
+    let labels: Vec<_> = labels.iter().collect();
+    assert_eq!(labels, [("name", "planner"), ("session.id", "s-1 \u{e9}")]);
+    // No labels at all.
+    let rec = cgroup(b"/", &[]).unwrap();
+    let Body::Cgroup { path, labels, .. } = decode_one(&rec).body else {
+        panic!();
+    };
+    assert_eq!(
+        (path, labels.is_empty(), labels.iter().count()),
+        (&b"/"[..], true, 0)
+    );
+}
+
+#[test]
+fn cgroup_records_refuse_what_they_cannot_carry() {
+    let long_value = [b'v'; LABEL_VALUE_LEN + 1];
+    let too_many: Vec<(&[u8], &[u8])> = (0..=MAX_LABELS).map(|_| (&b"k"[..], &b"v"[..])).collect();
+    for (path, labels) in [
+        (&[b'p'; CGROUP_PATH_LEN + 1][..], vec![]),
+        (&b"/a\0b"[..], vec![]),
+        (&b"/"[..], vec![(&b""[..], &b"v"[..])]),
+        (&b"/"[..], vec![(&b"Name"[..], &b"v"[..])]),
+        (&b"/"[..], vec![(&b"-a"[..], &b"v"[..])]),
+        (&b"/"[..], vec![(&b"a"[..], &b"line\nbreak"[..])]),
+        (&b"/"[..], vec![(&b"a"[..], &b"\xff"[..])]),
+        (&b"/"[..], vec![(&b"a"[..], &long_value[..])]),
+        (&b"/"[..], too_many),
+    ] {
+        assert_eq!(cgroup(path, &labels), None, "{path:?} {labels:?}");
+    }
+    assert!(
+        cgroup(
+            &[b'p'; CGROUP_PATH_LEN],
+            &[(b"a", &[b'v'; LABEL_VALUE_LEN])]
+        )
+        .is_some()
+    );
+    // An output buffer too short for the record.
+    let mut short = [0; 40];
+    assert_eq!(
+        encode_cgroup(1, 1, 1, 1, b"/a/long/path", &[], &mut short),
+        None
+    );
+}
+
+#[test]
+fn cgroup_records_with_bad_fields_are_corrupt() {
+    let good = cgroup(b"/a", &[(b"name", b"x")]).unwrap();
+    let at_labels_len = offset_of!(CgroupPrefix, labels_len);
+    let at_path_len = offset_of!(CgroupPrefix, path_len);
+    let with = |at: usize, value: u16| {
+        let mut rec = good.clone();
+        rec[at..at + 2].copy_from_slice(&value.to_ne_bytes());
+        rec
+    };
+    // Lengths that do not add up to the record, or exceed their maximum.
+    for rec in [
+        with(at_labels_len, 6),
+        with(at_path_len, 1),
+        with(at_path_len, u16::try_from(CGROUP_PATH_LEN + 1).unwrap()),
+        with(at_labels_len, u16::try_from(LABELS_LEN + 1).unwrap()),
+    ] {
+        assert!(
+            matches!(
+                decode(&rec),
+                Err(DecodeError::BadField {
+                    kind: Kind::Cgroup,
+                    ..
+                })
+            ),
+            "{rec:?}"
+        );
+    }
+    // Labels that are not key and value pairs, or not valid ones.
+    let body = size_of::<CgroupPrefix>() + 2;
+    for labels in [&b"name\0"[..], b"name\0x", b"Name\0x\0", b"n\0\x07\0"] {
+        let mut rec = good[..body].to_vec();
+        rec.extend_from_slice(labels);
+        let len = rec.len();
+        rec[..HDR].copy_from_slice(header(Kind::Cgroup.code(), len).as_bytes());
+        rec[at_labels_len..at_labels_len + 2]
+            .copy_from_slice(&u16::try_from(labels.len()).unwrap().to_ne_bytes());
+        assert!(
+            matches!(decode(&rec), Err(DecodeError::BadField { .. })),
+            "{labels:?}"
+        );
+    }
+    // A path over its maximum, though the lengths add up, and one at it.
+    let raw = |path_len: usize| {
+        let len = size_of::<CgroupPrefix>() + path_len;
+        let prefix = CgroupPrefix {
+            header: header(Kind::Cgroup.code(), len),
+            cgroup_id: 9,
+            owner_uid: 0,
+            path_len: u16::try_from(path_len).unwrap(),
+            labels_len: 0,
+        };
+        [prefix.as_bytes(), &vec![b'p'; path_len]].concat()
+    };
+    assert!(matches!(
+        decode(&raw(CGROUP_PATH_LEN + 1)),
+        Err(DecodeError::BadField { .. })
+    ));
+    let at_max = raw(CGROUP_PATH_LEN);
+    assert!(
+        matches!(decode_one(&at_max).body, Body::Cgroup { path, .. } if path.len() == CGROUP_PATH_LEN)
+    );
+    // Shorter than the fixed part.
+    let rec = record(Kind::Cgroup, size_of::<CgroupPrefix>() - 1, &[]);
+    assert!(matches!(
+        decode(&rec),
+        Err(DecodeError::Truncated {
+            kind: Kind::Cgroup,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn the_cgroup_id_is_peeked_from_task_and_exec_records_only() {
+    assert_eq!(peek_cgroup_id(&task(b"sh", b"cg")), Some(9));
+    assert_eq!(peek_cgroup_id(&exec(b"/bin/sh\0", b"")), Some(9));
+    assert_eq!(
+        peek_cgroup_id(&record(Kind::Fork, size_of::<ForkRecord>(), &[])),
+        None
+    );
+    assert_eq!(peek_cgroup_id(&cgroup(b"/", &[]).unwrap()), None);
+    assert_eq!(peek_cgroup_id(&task(b"sh", b"cg")[..20]), None);
+}
+
 #[test]
 fn unknown_kinds_are_skipped_by_length() {
     let mut rec = vec![0; HDR + 5];
@@ -576,6 +736,26 @@ proptest! {
             prop_assert_eq!(record.unwrap().body, Body::Heartbeat(hb));
         }
         prop_assert_eq!(records.consumed(), stream.len());
+    }
+
+    #[test]
+    fn cgroup_records_round_trip(
+        path in "/[a-z0-9/._-]{0,200}",
+        labels in proptest::collection::btree_map("[a-z0-9][a-z0-9_.-]{0,30}[a-z0-9]", "[^\\p{Cc}]{0,40}", 0..=MAX_LABELS),
+    ) {
+        let labels: Vec<(&[u8], &[u8])> = labels
+            .iter()
+            .filter(|(_, v)| v.len() <= LABEL_VALUE_LEN)
+            .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
+            .collect();
+        let rec = cgroup(path.as_bytes(), &labels).unwrap();
+        let Body::Cgroup { path: got, labels: got_labels, .. } = decode_one(&rec).body else {
+            panic!();
+        };
+        prop_assert_eq!(got, path.as_bytes());
+        let got_labels: Vec<(&[u8], &[u8])> =
+            got_labels.iter().map(|(k, v)| (k.as_bytes(), v.as_bytes())).collect();
+        prop_assert_eq!(got_labels, labels);
     }
 
     #[test]
