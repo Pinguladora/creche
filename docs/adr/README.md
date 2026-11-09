@@ -23,6 +23,7 @@ links only to earlier records, never to later ones.
 | [0009 The host attests the sandbox](0009-host-attests-the-sandbox.md) | Proposed |
 | [0010 The pod comes from the container runtime's bundle](0010-pod-from-the-runtime-bundle.md) | Proposed |
 | [0011 Identity within a pod: cgroup and uid per agent](0011-identity-within-a-pod.md) | Proposed |
+| [0012 Numbered streams chained with SHA-256 checkpoints](0012-audit-chain.md) | Proposed |
 
 ## Writing a record
 
