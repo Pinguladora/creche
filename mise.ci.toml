@@ -6,3 +6,91 @@ git config --global core.compression 0
 git config --global core.fsync -all
 """
 description = "Optimize Git config for CI (disable compression, fsync)"
+
+[tasks."ci:fmt"]
+description = "Fail when any Rust file is not formatted"
+run = "cargo fmt --all --check"
+
+[tasks."ci:clippy"]
+description = "Clippy on every target and feature, warnings as errors"
+run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+
+[tasks."ci:deny"]
+description = "Licenses, advisories, bans and sources (cargo-deny)"
+run = "cargo deny --locked check"
+
+[tasks."ci:check"]
+description = "Full CI gate: format, clippy, cargo-deny, then the tests (which build the BPF object)"
+depends = ["ci:fmt", "ci:clippy", "ci:deny"]
+run = "mise run test"
+
+[tasks."ci:trivy"]
+description = "Trivy scan as SARIF for code scanning, failing on HIGH or CRITICAL findings"
+run = "trivy fs --config trivy.yaml --format sarif --output trivy-results.sarif --exit-code 1 ."
+
+[tasks."release:security-check"]
+description = "Exit 0 when a commit since the last tag carries a [security] marker"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+LAST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+if [ -z "$LAST_TAG" ]; then
+  echo "No tags yet; the first release is cut manually. Skipping."
+  exit 1
+fi
+if git log "${LAST_TAG}..HEAD" -i --grep='\[security\]' --format='%H' | grep -q .; then
+  echo "Security patch found since ${LAST_TAG}; a release is warranted."
+else
+  echo "No security patch since ${LAST_TAG}; skipping release."
+  exit 1
+fi
+'''
+
+[tasks."release:build"]
+description = "Build the static musl binaries and pack them into reproducible tarballs with checksums"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+TARGET=x86_64-unknown-linux-musl
+cargo build --release --locked --target "$TARGET" -p creche-observer -p creche-sink
+rm -rf dist && mkdir dist
+# Reproducible: fixed order, owner and modification time (the tagged commit's).
+EPOCH=$(git log -1 --format=%ct)
+for bin in creche-observer creche-sink; do
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${EPOCH}" \
+    -C "target/${TARGET}/release" -cf - "$bin" | gzip -n > "dist/${bin}_Linux_x86_64.tar.gz"
+done
+(cd dist && sha256sum ./*.tar.gz | sed 's| \./| |' > checksums.txt)
+'''
+
+[tasks.release]
+description = "Build, sign checksums.txt keyless with cosign and publish the GitHub release for the current tag"
+depends = ["release:build"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+TAG="${GITHUB_REF_NAME:?the tag to release}"
+cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt
+gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes dist/*
+'''
+
+[tasks."verify:binary"]
+description = "Verify a release tarball (checksum, cosign signature, SLSA provenance)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+ARCHIVE="{{arg(i=0, name="archive")}}"
+sha256sum --check --ignore-missing checksums.txt
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp "^https://github.com/Pinguladora/creche/" \
+  checksums.txt
+slsa-verifier verify-artifact \
+  --provenance-path provenance.intoto.jsonl \
+  --source-uri github.com/Pinguladora/creche \
+  "${ARCHIVE}"
+'''
+
+[tools]
+"aqua:slsa-framework/slsa-verifier" = "2.7.1"

@@ -60,11 +60,16 @@ impl Output {
     }
 
     /// Sends the queued records, connecting first if needed. A failed connection
-    /// is dropped and retried on the next call. The records stay queued.
+    /// is dropped and retried on the next call. The records stay queued. A new
+    /// connection starts with the record `hello` builds once it is connected.
     ///
     /// Returns `true` when this call reconnected: the host may have lost records
     /// sent on the previous connection.
-    pub fn send(&mut self, queue: &mut RecordQueue, hello: &[u8]) -> bool {
+    pub fn send<H: AsRef<[u8]>>(
+        &mut self,
+        queue: &mut RecordQueue,
+        hello: impl FnOnce() -> H,
+    ) -> bool {
         let mut reconnected = false;
         if self.conn.is_none() {
             self.conn = self.connect(hello).ok();
@@ -81,7 +86,7 @@ impl Output {
         reconnected
     }
 
-    fn connect(&self, hello: &[u8]) -> io::Result<Conn> {
+    fn connect<H: AsRef<[u8]>>(&self, hello: impl FnOnce() -> H) -> io::Result<Conn> {
         let mut conn = match self.target {
             Target::Stdout => Conn::Stdout(io::stdout()),
             Target::Vsock(port) => {
@@ -95,7 +100,7 @@ impl Output {
                 Conn::Vsock(File::from(fd))
             }
         };
-        conn.write_all(hello)?;
+        conn.write_all(hello().as_ref())?;
         Ok(conn)
     }
 }
