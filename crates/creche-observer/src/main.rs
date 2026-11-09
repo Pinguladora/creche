@@ -121,7 +121,11 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<()> {
-    let mut probes = Probes::load(args.dedup, args.stage)?;
+    let port = match args.target {
+        Target::Vsock(port) => Some(port),
+        Target::Stdout => None,
+    };
+    let mut probes = Probes::load(args.dedup, args.stage, port)?;
     // Kernel-side run-time accounting stays on while this fd is open.
     let _stats = args
         .stats
@@ -137,10 +141,16 @@ fn run(args: &Args) -> Result<()> {
     if probes.process_only {
         flags = flags.with(HelloFlags::PROCESS_ONLY);
     }
-    let hello = HelloRecord {
+    // Built on each new connection, after the guard has had the chance to see
+    // the observer's own connect.
+    let hello = |guarded: bool| HelloRecord {
         header: Header::for_observer(Kind::Hello, HELLO_LEN, pid, metrics::boottime_ns()),
         version: VERSION,
-        flags,
+        flags: if guarded {
+            flags.with(HelloFlags::GUARDED)
+        } else {
+            flags
+        },
     };
 
     let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?;
@@ -196,7 +206,7 @@ fn run(args: &Args) -> Result<()> {
             };
             queue.push(heartbeat.as_bytes());
         }
-        let reconnected = output.send(&mut queue, hello.as_bytes());
+        let reconnected = output.send(&mut queue, || hello(probes.guarded()).as_bytes().to_vec());
         // Records may have been lost, task records among them.
         if reconnected || queue.dropped_bytes() != dropped {
             dropped = queue.dropped_bytes();
