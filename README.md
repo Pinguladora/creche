@@ -40,6 +40,12 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   the end of the window, so a burst costs one wakeup. Each wakeup is an interrupt,
   a timer and a vsock doorbell, all VM exits. Idle, it sleeps until the 5 s
   heartbeat.
+- **Only the observer reaches the host.** A BPF LSM program on `socket_connect`
+  refuses the observer's vsock port to every other guest process, so a workload
+  cannot send records the host would take for the observer's. The guard counts
+  the connects it sees, the observer's own included, so the observer knows it
+  runs and says so in its hello record (`creche.observer.guarded`). Kernels
+  without BPF LSM still work, reported as unguarded.
 - **Whole records only.** The forwarding queue is bounded and never splits a record
   across connections. Heartbeats report drops so silence can be told from blindness.
 - **The host attests the sandbox.** Each sandbox's socket is mode 0600, owned by
@@ -96,6 +102,22 @@ tools below), clang, and the kernel UAPI headers (`linux/bpf.h`).
 mise install
 cargo build --release -p creche-sink
 cargo build --release -p creche-observer --target x86_64-unknown-linux-musl   # static, for the guest image
+```
+
+## Releases
+
+Each `v*` tag publishes static x86_64 musl builds of `creche-observer` and
+`creche-sink` as reproducible tarballs, a `checksums.txt` signed keyless with
+cosign, and SLSA provenance. A merged dependency fix that Renovate marks
+`[security]` cuts a patch release on its own. To verify a download:
+
+```sh
+sha256sum --check --ignore-missing checksums.txt
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/Pinguladora/creche/' checksums.txt
+slsa-verifier verify-artifact --provenance-path provenance.intoto.jsonl \
+  --source-uri github.com/Pinguladora/creche creche-sink_Linux_x86_64.tar.gz
 ```
 
 ## Checks

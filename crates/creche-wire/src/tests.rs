@@ -207,17 +207,85 @@ fn task_records_carry_the_context() {
     ));
 }
 
+/// An open record whose `path_len` says `path_len` and that carries `path`.
+fn open(path_len: usize, path: &[u8]) -> Vec<u8> {
+    let off = offset_of!(OpenRecord, path);
+    let len = u32::try_from(path_len).unwrap().to_ne_bytes();
+    record(
+        Kind::OpenWrite,
+        off + path.len(),
+        &[(offset_of!(OpenRecord, path_len), &len), (off, path)],
+    )
+}
+
+fn bad_field(rec: &[u8]) -> Result<Option<(Record<'_>, usize)>, DecodeError> {
+    Err(DecodeError::BadField {
+        kind: Kind::from_code(u16::from_ne_bytes([rec[0], rec[1]])).unwrap(),
+        len: u16::from_ne_bytes([rec[2], rec[3]]),
+    })
+}
+
 #[test]
 fn open_write_path() {
     let path = b"/workspace/notes.txt\0";
-    let off = offset_of!(OpenRecord, path);
-    let rec = record(Kind::OpenWrite, off + path.len(), &[(off, path)]);
     assert_eq!(
-        decode_one(&rec).body,
+        decode_one(&open(path.len(), path)).body,
         Body::OpenWrite {
             path: b"/workspace/notes.txt"
         }
     );
+    // A failed path lookup sends no path.
+    assert_eq!(
+        decode_one(&open(0, b"")).body,
+        Body::OpenWrite { path: b"" }
+    );
+    let rec = record(Kind::OpenWrite, offset_of!(OpenRecord, path) - 1, &[]);
+    assert!(matches!(
+        decode(&rec),
+        Err(DecodeError::Truncated {
+            kind: Kind::OpenWrite,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn fields_are_bounded_by_their_maximum() {
+    // At the maximum, with a NUL-free path or name.
+    let path = [b'p'; PATH_LEN];
+    assert_eq!(
+        decode_one(&open(PATH_LEN, &path)).body,
+        Body::OpenWrite { path: &path }
+    );
+    let cgroup = [b'c'; CGROUP_LEN];
+    assert!(matches!(
+        decode_one(&task(b"sh\0", &cgroup)).body,
+        Body::Task { cgroup: c, .. } if c == cgroup
+    ));
+    let args = [b'a'; ARGS_LEN];
+    assert!(matches!(
+        decode_one(&exec(&path, &args)).body,
+        Body::Exec { path: p, args: a, .. } if p == path && a == args
+    ));
+    // One byte past it.
+    let long = [b'x'; PATH_LEN + 1];
+    for rec in [
+        open(PATH_LEN + 1, &long),
+        task(b"sh\0", &long[..=CGROUP_LEN]),
+        exec(&long, b""),
+        exec(b"/bin/ls\0", &[b'a'; ARGS_LEN + 1]),
+    ] {
+        assert_eq!(decode(&rec), bad_field(&rec));
+    }
+}
+
+#[test]
+fn open_path_length_must_match_the_record() {
+    let path = b"/tmp/y\0";
+    for path_len in [0, path.len() - 1, path.len() + 1, PATH_LEN] {
+        let rec = open(path_len, path);
+        assert_eq!(decode(&rec), bad_field(&rec), "path_len {path_len}");
+    }
 }
 
 #[test]
@@ -459,6 +527,14 @@ fn errors_display() {
         .to_string(),
         "Exit record truncated to 20 bytes"
     );
+    assert_eq!(
+        DecodeError::BadField {
+            kind: Kind::Task,
+            len: 200
+        }
+        .to_string(),
+        "Task record of 200 bytes has a field out of bounds"
+    );
 }
 
 #[test]
@@ -506,8 +582,7 @@ proptest! {
     fn open_paths_round_trip(path in "/[a-z0-9/._-]{0,200}") {
         let mut bytes = path.clone().into_bytes();
         bytes.push(0);
-        let off = offset_of!(OpenRecord, path);
-        let rec = record(Kind::OpenWrite, off + bytes.len(), &[(off, &bytes)]);
+        let rec = open(bytes.len(), &bytes);
         prop_assert_eq!(decode_one(&rec).body, Body::OpenWrite { path: path.as_bytes() });
     }
 
