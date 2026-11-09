@@ -17,3 +17,6 @@
 *.profdata
 perf.data
 perf.data.old
+
+# Release tarballs and checksums from `mise run release:build`.
+/dist
