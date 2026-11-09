@@ -5,7 +5,10 @@ ignore_fixup_commits = true
 # Tag-only releases: cog bump just creates and pushes the tags, with no bump
 # commit and no committed CHANGELOG.md, so main and the tags stay in sync. Each
 # crate is a package with its own tags (creche-sink/v0.2.0), versioned from the
-# commits that touch its path, plus a global tag for the workspace.
+# commits that touch its path or the workspace's Cargo.toml and Cargo.lock, plus a
+# global v tag for the workspace, which triggers the release. A dependency fix
+# usually touches only Cargo.lock, so without those files no crate would bump and
+# no release would follow.
 disable_changelog = true
 disable_bump_commit = true
 generate_mono_repository_global_tag = true
@@ -15,6 +18,7 @@ branch_whitelist = ["main"]
 skip_ci = "[skip ci]"
 skip_untracked = true
 post_bump_hooks = ["git push origin {{version_tag}}"]
+post_package_bump_hooks = ["git push origin {{version_tag}}"]
 
 [git_hooks]
 
@@ -41,6 +45,6 @@ authors = [
 [monorepo]
 
 [monorepo.packages]
-creche-wire = { path = "crates/creche-wire" }
-creche-observer = { path = "crates/creche-observer" }
-creche-sink = { path = "crates/creche-sink" }
+creche-wire = { path = "crates/creche-wire", include = ["Cargo.toml", "Cargo.lock"] }
+creche-observer = { path = "crates/creche-observer", include = ["Cargo.toml", "Cargo.lock"] }
+creche-sink = { path = "crates/creche-sink", include = ["Cargo.toml", "Cargo.lock"] }

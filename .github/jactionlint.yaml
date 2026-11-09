@@ -1,0 +1,7 @@
+profile: default
+rules:
+  unpinned-uses:
+    policies:
+      # The SLSA generator must be called by a tag, which slsa-verifier checks.
+      "slsa-framework/slsa-github-generator": ref-pin
+      "*": hash-pin
