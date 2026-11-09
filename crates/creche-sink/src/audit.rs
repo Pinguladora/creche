@@ -329,6 +329,9 @@ struct Start {
     svid: String,
     key: String,
     key_sig: String,
+    /// Its place in the stream. The sandbox it names is proven only once a
+    /// checkpoint covers it.
+    seq: Option<u64>,
     sandbox: Option<String>,
     pod_uid: Option<String>,
 }
@@ -489,30 +492,39 @@ impl Nodes {
         Ok(Self(nodes))
     }
 
-    /// The node of a sandbox, by its pod uid first, then its sandbox id.
+    /// The node of a sandbox, by its pod uid or its sandbox id. When the
+    /// history knows both, they must agree.
     fn node_of(&self, pod_uid: Option<&str>, sandbox: Option<&str>) -> Result<&str, String> {
-        [pod_uid, sandbox]
-            .into_iter()
-            .flatten()
-            .find_map(|key| self.0.get(key))
-            .map(String::as_str)
-            .ok_or_else(|| match (pod_uid, sandbox) {
+        let by_pod = pod_uid.and_then(|uid| self.0.get(uid));
+        let by_sandbox = sandbox.and_then(|id| self.0.get(id));
+        match (by_pod, by_sandbox) {
+            (Some(a), Some(b)) if a != b => Err(format!(
+                "pod {} is on {a}, but sandbox {} is on {b}",
+                pod_uid.unwrap_or_default(),
+                sandbox.unwrap_or_default()
+            )),
+            (Some(node), _) | (None, Some(node)) => Ok(node),
+            (None, None) => Err(match (pod_uid, sandbox) {
                 (Some(uid), _) => format!("no node is known for pod {uid}"),
                 (None, Some(id)) => format!("no node is known for sandbox {id}"),
                 (None, None) => "the stream names no sandbox".to_owned(),
-            })
+            }),
+        }
     }
 }
 
-/// Whether `name` is a Kubernetes node name: a DNS subdomain, lowercase
-/// letters, digits, `-` and `.`, starting and ending with a letter or digit.
+/// Whether `name` is a Kubernetes node name or uid: a DNS subdomain of at
+/// most 253 bytes, whose dot separated labels are 1 to 63 lowercase letters,
+/// digits and `-`, starting and ending with a letter or digit.
 fn is_node_name(name: &str) -> bool {
     let alnum = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    let bytes = name.as_bytes();
-    (1..=253).contains(&bytes.len())
-        && bytes.first().is_some_and(alnum)
-        && bytes.last().is_some_and(alnum)
-        && bytes.iter().all(|b| alnum(b) || *b == b'-' || *b == b'.')
+    let label = |l: &[u8]| {
+        (1..=63).contains(&l.len())
+            && l.first().is_some_and(alnum)
+            && l.last().is_some_and(alnum)
+            && l.iter().all(|b| alnum(b) || *b == b'-')
+    };
+    name.len() <= 253 && name.as_bytes().split(|&b| b == b'.').all(label)
 }
 
 /// Checks the audit chains in `output`, the bytes the sink wrote. Lines of
@@ -528,6 +540,9 @@ pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
     let mut lines: BTreeMap<String, Vec<(u64, &[u8])>> = BTreeMap::new();
     let mut checkpoints: BTreeMap<String, Vec<Checkpoint>> = BTreeMap::new();
     let mut starts: BTreeMap<String, Start> = BTreeMap::new();
+    // The sandbox and pod each stream's first line names, and whether a later
+    // line named another.
+    let mut places: BTreeMap<String, (Option<String>, Option<String>, bool)> = BTreeMap::new();
     for line in output.split_inclusive(|&b| b == b'\n') {
         let entry = std::str::from_utf8(line)
             .ok()
@@ -542,6 +557,12 @@ pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
         };
         let event = entry.event.unwrap_or_default();
         let status = report.streams.entry(stream.clone()).or_default();
+        let place = places
+            .entry(stream.clone())
+            .or_insert_with(|| (entry.sandbox.clone(), entry.pod_uid.clone(), false));
+        if place.0 != entry.sandbox || place.1 != entry.pod_uid {
+            place.2 = true;
+        }
         match event.as_str() {
             "creche.stream.end" => status.ended = true,
             "creche.stream.start" => {
@@ -557,6 +578,7 @@ pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
                             svid,
                             key,
                             key_sig,
+                            seq: entry.seq,
                             sandbox: entry.sandbox,
                             pod_uid: entry.pod_uid,
                         },
@@ -591,36 +613,64 @@ pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
         }
     }
     for (stream, status) in &mut report.streams {
+        if places.get(stream).is_some_and(|place| place.2) {
+            status
+                .problems
+                .push("lines of the stream name different sandboxes or pods".into());
+        }
         let mut stream_lines = lines.remove(stream).unwrap_or_default();
         let mut stream_checkpoints = checkpoints.remove(stream).unwrap_or_default();
-        let key = match (starts.remove(stream), trust) {
-            (Some(start), _) => match first_key(stream, &start, trust) {
-                Ok((signer, node, key)) => {
-                    status.signer = Some(signer);
-                    status.trusted = trust.is_some();
-                    status.node = node;
-                    Some(key)
-                }
-                Err(problem) => {
-                    status.problems.push(problem);
-                    continue;
-                }
-            },
-            (None, Some(_)) => {
-                status.problems.push("the stream is not signed".into());
-                continue;
-            }
-            (None, None) => None,
-        };
-        check(
+        verify_stream(
             stream,
             &mut stream_lines,
             &mut stream_checkpoints,
-            key,
+            starts.remove(stream),
+            trust,
             status,
         );
     }
     report
+}
+
+/// Checks one stream's signer, with `trust` the sink allowed to sign it, then
+/// its lines against its checkpoints.
+fn verify_stream(
+    stream: &str,
+    lines: &mut Vec<(u64, &[u8])>,
+    checkpoints: &mut Vec<Checkpoint>,
+    start: Option<Start>,
+    trust: Option<&Trust>,
+    status: &mut StreamReport,
+) {
+    let start_seq = start.as_ref().and_then(|start| start.seq);
+    let key = match (start, trust) {
+        (Some(start), _) => match first_key(stream, &start, trust) {
+            Ok((signer, node, key)) => {
+                status.signer = Some(signer);
+                status.trusted = trust.is_some();
+                status.node = node;
+                Some(key)
+            }
+            Err(problem) => {
+                status.problems.push(problem);
+                return;
+            }
+        },
+        (None, Some(_)) => {
+            status.problems.push("the stream is not signed".into());
+            return;
+        }
+        (None, None) => None,
+    };
+    check(stream, lines, checkpoints, key, status);
+    // The start line's signature covers the stream's key, not the sandbox it
+    // names. That is proven by the first signed checkpoint.
+    if status.node.is_some() && start_seq.is_none_or(|seq| status.verified <= seq) {
+        status.node = None;
+        status
+            .problems
+            .push("no checkpoint covers the start line, so its sandbox is unproven".into());
+    }
 }
 
 /// The SPIFFE ID, the node it was checked against and the first key of a
@@ -786,6 +836,8 @@ fn signed_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json::Attribution;
+    use crate::k8s::Pod;
 
     fn origin() -> Origin {
         Origin::from("sb").with_stream("s1")
@@ -1055,12 +1107,15 @@ mod tests {
     /// A signed stream of `n` lines after its start line, from `svid`, with its
     /// chain as it stands at the end.
     fn signed_stream(n: u64, svid: &Svid) -> (Vec<u8>, Chain) {
-        let origin = origin();
+        signed_stream_from(&origin(), n, svid)
+    }
+
+    fn signed_stream_from(origin: &Origin, n: u64, svid: &Svid) -> (Vec<u8>, Chain) {
         let (mut chain, fields) = Chain::signed("s1", svid).unwrap();
         let fields: Vec<_> = fields.iter().map(|(k, v)| (*k, Value::Str(v))).collect();
         let mut out = Vec::new();
         sink_event(
-            &origin,
+            origin,
             "creche.stream.start",
             START_NS,
             Some(0),
@@ -1070,14 +1125,14 @@ mod tests {
         chain.absorb(&out.clone(), 1, START_NS);
         for seq in 1..=n {
             let start = out.len();
-            sink_event(&origin, "creche.test", START_NS, Some(seq), &[], &mut out);
+            sink_event(origin, "creche.test", START_NS, Some(seq), &[], &mut out);
             let line = out[start..].to_vec();
             chain.absorb(&line, seq + 1, START_NS);
             if chain.due(START_NS) {
-                chain.checkpoint(&origin, START_NS, &mut out);
+                chain.checkpoint(origin, START_NS, &mut out);
             }
         }
-        chain.checkpoint(&origin, START_NS, &mut out);
+        chain.checkpoint(origin, START_NS, &mut out);
         (out, chain)
     }
 
@@ -1237,34 +1292,81 @@ mod tests {
     }
 
     #[test]
-    fn a_pod_uid_decides_before_the_sandbox_id() {
-        let start = |pod_uid: Option<&str>| Start {
+    fn a_pod_uid_from_the_stream_decides_its_node() {
+        let pod = Pod {
+            name: "agent".into(),
+            namespace: "agents".into(),
+            uid: "uid-1".into(),
+        };
+        let origin = Origin::new("sb", &Attribution::Pod(pod)).with_stream("s1");
+        let (out, _) = signed_stream_from(&origin, 10, &sink_svid());
+        let report = verify(&out, Some(&on_nodes("uid-1 sink\n")));
+        assert!(report.intact(), "{report:?}");
+        assert_eq!(report.streams["s1"].node.as_deref(), Some("sink"));
+        // The history may name both, on one node, but not place them apart.
+        let report = verify(&out, Some(&on_nodes("uid-1 sink\nsb sink\n")));
+        assert!(report.intact(), "{report:?}");
+        let report = verify(&out, Some(&on_nodes("uid-1 sink\nsb other\n")));
+        assert_eq!(
+            report.streams["s1"].problems,
+            ["pod uid-1 is on sink, but sandbox sb is on other"]
+        );
+        // A pod missing from the history falls back to its sandbox id.
+        let report = verify(&out, Some(&on_nodes("sb sink\n")));
+        assert!(report.intact(), "{report:?}");
+        let report = verify(&out, Some(&on_nodes("uid-2 sink\n")));
+        assert_eq!(
+            report.streams["s1"].problems,
+            ["no node is known for pod uid-1"]
+        );
+    }
+
+    #[test]
+    fn a_stream_without_a_sandbox_has_no_node() {
+        let start = Start {
             observed_ns: 0,
             spiffe_id: String::new(),
             svid: String::new(),
             key: String::new(),
             key_sig: String::new(),
-            sandbox: Some("sb".into()),
-            pod_uid: pod_uid.map(Into::into),
+            seq: Some(0),
+            sandbox: None,
+            pod_uid: None,
         };
-        let trust = on_nodes("sb other\nuid-1 sink\n");
-        let id = "spiffe://creche.test/sink";
         assert_eq!(
-            trust.allows(id, &start(Some("uid-1"))),
-            Ok(Some("sink".into()))
-        );
-        // A pod missing from the history falls back to the sandbox id.
-        assert!(trust.allows(id, &start(Some("uid-2"))).is_err());
-        assert_eq!(
-            trust.allows("spiffe://creche.test/other", &start(Some("uid-2"))),
-            Ok(Some("other".into()))
-        );
-        let mut nameless = start(None);
-        nameless.sandbox = None;
-        assert_eq!(
-            trust.allows(id, &nameless),
+            on_nodes("sb sink\n").allows("spiffe://creche.test/sink", &start),
             Err("the stream names no sandbox".into())
         );
+    }
+
+    #[test]
+    fn every_line_of_a_stream_names_the_same_sandbox() {
+        let mut out = Vec::new();
+        for (seq, sandbox) in [(0, "sb"), (1, "sb2")] {
+            let origin = Origin::from(sandbox).with_stream("s1");
+            sink_event(&origin, "creche.test", seq, Some(seq), &[], &mut out);
+        }
+        assert_eq!(
+            verify(&out, None).streams["s1"].problems,
+            ["lines of the stream name different sandboxes or pods"]
+        );
+    }
+
+    #[test]
+    fn a_node_needs_the_start_line_checkpointed() {
+        let (out, _) = signed_stream(10, &sink_svid());
+        let text = String::from_utf8(out).unwrap();
+        let unsealed: String = text
+            .split_inclusive('\n')
+            .filter(|l| !l.contains("creche.audit.checkpoint"))
+            .collect();
+        let report = verify(unsealed.as_bytes(), Some(&on_nodes("sb sink\n")));
+        let s = &report.streams["s1"];
+        assert_eq!(
+            s.problems,
+            ["no checkpoint covers the start line, so its sandbox is unproven"]
+        );
+        assert_eq!(s.node, None);
     }
 
     #[test]
@@ -1286,7 +1388,16 @@ mod tests {
             assert_eq!(Nodes::parse(text).unwrap_err(), problem, "{text}");
         }
         assert!(is_node_name("kairos-e694.lab"));
-        assert!(!is_node_name(&"a".repeat(254)));
+        assert!(is_node_name("1f2e3d4c-0000-4000-8000-0123456789ab"));
+        assert!(is_node_name(&"a".repeat(63)));
+        for bad in ["", "a..b", "a.-b", "a-.b", ".a", "a.", "A", "a_b"] {
+            assert!(!is_node_name(bad), "{bad:?}");
+        }
+        assert!(!is_node_name(&"a".repeat(64)));
+        let long = vec!["a".repeat(63); 4].join(".");
+        assert_eq!(long.len(), 255);
+        assert!(!is_node_name(&long));
+        assert!(is_node_name(&long[2..]));
     }
 
     #[test]

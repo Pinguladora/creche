@@ -198,8 +198,14 @@ the pipelines they already feed.
   its sandbox ran on: every `--spiffe-id` holds `{node}`, and FILE has lines of
   `<pod uid or sandbox id> <node>` from the cluster's pod history, for instance
   `kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.uid} {.spec.nodeName}{"\n"}{end}'`
-  for the pods still around. Register each node's sink with that node's SPIRE
-  agent as parent, so no other node can be issued its ID.
+  for the pods still around. Without pods (`--no-pods`), the sandbox ids come
+  from each host while they run, such as `crictl pods -q` or the directories under
+  `/run/vc/vm`, each listed with that host's node. When the file knows both a
+  stream's pod and its sandbox, they must agree. Every line of a stream must name
+  the same sandbox, and the node counts only once a checkpoint covers the start
+  line. Register each node's sink with that node's SPIRE agent as parent, so no
+  other node can be issued its ID. Where node names are reused, use the node's
+  uid in both the IDs and FILE instead.
 - **OpenTelemetry logs** (`--otlp URL`, with JSON output): the same lines,
   also exported to a collector as OTLP over gRPC (`--otlp-protocol grpc`, the
   default, port 4317) or OTLP/HTTP (`--otlp-protocol http`, port 4318), protobuf
