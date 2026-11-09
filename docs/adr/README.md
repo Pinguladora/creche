@@ -27,6 +27,7 @@ which names the record that replaced it.
 | [0012 Numbered streams chained with SHA-256 checkpoints](0012-audit-chain.md) | Proposed |
 | [0013 OTLP export over gRPC with zstd, the line as the body](0013-otlp-export.md) | Proposed |
 | [0014 Checkpoints signed with a ratchet anchored to a SPIFFE SVID](0014-signed-checkpoints.md) | Proposed |
+| [0015 The observer guards its vsock port with BPF LSM](0015-observer-guards-its-port.md) | Proposed |
 
 ## Writing a record
 

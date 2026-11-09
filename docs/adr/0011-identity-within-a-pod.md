@@ -57,10 +57,11 @@ uid, which also limits what agents can do to each other. Shared uids or loose
 permissions weaken it: an agent able to write a sibling's or a common ancestor's
 `cgroup.procs` can move into the sibling's cgroup.
 
-Tier 2 needs the observer to be the only sender. Today any guest process that can
-open a vsock socket can connect to the observer's port and send records of its
-own, which the host cannot tell from the observer's. Until the observer refuses
-other processes that port, for example with a BPF LSM program, a workload in the
-pod can forge tier 2 fields. Root in the guest can forge tiers 2 and 3 anyway,
-which is why strong separation means one agent per VM. Sessions multiplexed in one process are out of reach of kernel
+Tier 2 needs the observer to be the only sender. Any guest process that can open
+a vsock socket could connect to the observer's port and send records of its own,
+which the host cannot tell from the observer's, unless the observer refuses that
+port to other processes. A workload in the pod can forge tier 2 fields wherever
+the observer is not guarded. A process that can load BPF programs or take over
+the observer can forge tiers 2 and 3 anyway, which is why strong separation means
+one agent per VM. Sessions multiplexed in one process are out of reach of kernel
 observation.
