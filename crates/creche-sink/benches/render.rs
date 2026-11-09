@@ -20,12 +20,14 @@ fn render(c: &mut Criterion) {
             namespace: "agents".into(),
             uid: "1f2e3d4c-0000-4000-8000-000000000001".into(),
         }),
-    );
+    )
+    .with_stream("18c2d0e4a1b2c3d4-0");
     let mut out = Vec::new();
     group.bench_function("render_sample_stream", |b| {
         b.iter(|| {
             out.clear();
-            let mut decoder = StreamDecoder::default();
+            // Audited, as the listener runs it.
+            let mut decoder = StreamDecoder::default().with_audit();
             let fed = decoder.feed(black_box(&stream), &origin, &mut out);
             black_box((fed.is_ok(), out.len()))
         });

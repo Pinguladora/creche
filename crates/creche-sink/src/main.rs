@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 
+use creche_sink::audit;
 use creche_sink::k8s::CONTAINERD_BUNDLES;
 use creche_sink::listen::{self, Options};
 use creche_sink::stream::{Format, StreamDecoder};
@@ -14,6 +15,7 @@ use creche_sink::stream::{Format, StreamDecoder};
 const USAGE: &str = "\
 usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
        creche-sink -f FILE|- [-o json|raw]
+       creche-sink --verify FILE|-
   -d, --dir DIR      directory of Kata sandboxes (default /run/vc/vm)
   -p, --port PORT    vsock port the observers connect to (default 7000)
   -b, --bundles DIR  containerd bundles, to name each sandbox's pod
@@ -21,12 +23,15 @@ usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
       --no-pods      do not look up pods
   -f, --file FILE    decode a captured stream (- for stdin) and exit
   -o, --output FMT   json: one JSON line per event, OpenTelemetry attribute names (default)
-                     raw: the records unchanged, in frames naming their sandbox";
+                     raw: the records unchanged, in frames naming their sandbox
+      --verify FILE  check the audit chains in saved JSON output (- for stdin) and exit,
+                     with status 1 when a stream does not add up";
 
 #[derive(Debug)]
 enum Mode {
     Listen { dir: PathBuf, options: Options },
     Decode { file: PathBuf, format: Format },
+    Verify { file: PathBuf },
 }
 
 fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
@@ -36,6 +41,7 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
     let mut port = 7000;
     let mut bundles = Some(PathBuf::from(CONTAINERD_BUNDLES));
     let mut file = None;
+    let mut verify = None;
     let mut format = Format::Json;
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
@@ -45,6 +51,7 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
             Short('b') | Long("bundles") => bundles = Some(parser.value()?.into()),
             Long("no-pods") => bundles = None,
             Short('f') | Long("file") => file = Some(PathBuf::from(parser.value()?)),
+            Long("verify") => verify = Some(PathBuf::from(parser.value()?)),
             Short('o') | Long("output") => {
                 format = match parser.value()?.to_str() {
                     Some("json") => Format::Json,
@@ -56,9 +63,10 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
             _ => return Err(arg.unexpected()),
         }
     }
-    Ok(Some(match file {
-        Some(file) => Mode::Decode { file, format },
-        None => Mode::Listen {
+    Ok(Some(match (verify, file) {
+        (Some(file), _) => Mode::Verify { file },
+        (None, Some(file)) => Mode::Decode { file, format },
+        (None, None) => Mode::Listen {
             dir,
             options: Options {
                 port,
@@ -84,6 +92,11 @@ fn main() -> ExitCode {
     let result = match mode {
         Mode::Decode { file, format } => decode_file(&file, format),
         Mode::Listen { dir, options } => listen(dir, options),
+        Mode::Verify { file } => match verify(&file) {
+            Ok(true) => Ok(()),
+            Ok(false) => return ExitCode::from(1),
+            Err(e) => Err(e),
+        },
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -105,7 +118,8 @@ fn listen(dir: PathBuf, options: Options) -> Result<()> {
         .context("writing output")
 }
 
-fn decode_file(file: &PathBuf, format: Format) -> Result<()> {
+/// The bytes of `file`, or of stdin for `-`.
+fn read_input(file: &PathBuf) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     if file.as_os_str() == "-" {
         io::stdin()
@@ -114,6 +128,36 @@ fn decode_file(file: &PathBuf, format: Format) -> Result<()> {
     } else {
         data = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     }
+    Ok(data)
+}
+
+/// Prints what [`audit::verify`] found in `file`. Whether every stream is intact.
+fn verify(file: &PathBuf) -> Result<bool> {
+    let report = audit::verify(&read_input(file)?);
+    let mut out = io::stdout().lock();
+    for (stream, s) in &report.streams {
+        writeln!(
+            out,
+            "stream {stream}: {} lines, {} verified by {} checkpoints, {}",
+            s.lines,
+            s.verified,
+            s.checkpoints,
+            if s.ended { "ended" } else { "open" }
+        )?;
+        for problem in &s.problems {
+            writeln!(out, "  problem: {problem}")?;
+        }
+    }
+    writeln!(
+        out,
+        "{} lines outside any stream, {} unreadable",
+        report.outside, report.unreadable
+    )?;
+    Ok(report.intact())
+}
+
+fn decode_file(file: &PathBuf, format: Format) -> Result<()> {
+    let data = read_input(file)?;
     let mut decoder = StreamDecoder::new(format);
     let mut lines = Vec::new();
     decoder

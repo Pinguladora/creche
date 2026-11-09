@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -20,10 +21,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::json::{Attribution, Origin};
+use crate::json::{Attribution, Origin, Value, sink_event};
 use crate::k8s::{self, Containers, Unresolved};
 use crate::peer::{self, Refusal};
-use crate::stream::{Format, StreamDecoder};
+use crate::stream::{Format, StreamDecoder, now_ns};
 
 /// How often sandbox directories are rescanned.
 const SCAN_INTERVAL: Duration = Duration::from_millis(200);
@@ -174,10 +175,13 @@ async fn accept(
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     while let Ok((stream, _)) = listener.accept().await {
         let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
-            eprintln!(
-                "creche-sink: refusing a connection to {}: {MAX_CONNECTIONS} already open",
-                short(&sandbox.id)
-            );
+            let reason = format!("{MAX_CONNECTIONS} connections already open");
+            let cred = stream.peer_cred().ok();
+            let peer = Peer {
+                pid: cred.and_then(|c| c.pid()),
+                uid: cred.map(|c| c.uid()),
+            };
+            refused(&sandbox.id, &reason, peer, format, &tx).await;
             continue;
         };
         tokio::spawn(admit(stream, sandbox.clone(), format, tx.clone(), permit));
@@ -192,25 +196,84 @@ async fn admit(
     tx: mpsc::Sender<Vec<u8>>,
     _permit: OwnedSemaphorePermit,
 ) {
-    let verdict = match stream.peer_cred() {
-        Ok(cred) => {
+    let cred = stream.peer_cred().ok();
+    let (pid, uid) = (cred.and_then(|c| c.pid()), cred.map(|c| c.uid()));
+    let verdict = match uid {
+        Some(uid) => {
             let vsock = Arc::clone(&sandbox.vsock);
-            tokio::task::spawn_blocking(move || peer::check(cred.pid(), cred.uid(), &vsock))
+            tokio::task::spawn_blocking(move || peer::check(pid, uid, &vsock))
                 .await
                 .unwrap_or(Err(Refusal::Io(io::ErrorKind::Other)))
         }
-        Err(e) => Err(Refusal::from(e)),
+        None => Err(Refusal::NoPid),
     };
+    let peer = Peer { pid, uid };
     match verdict {
         Ok(()) => {
             let (origin, containers) = origin(&sandbox).await;
-            receive(stream, origin, containers, format, tx).await;
+            receive(stream, origin, containers, peer, format, tx).await;
         }
-        Err(refusal) => eprintln!(
-            "creche-sink: refusing a connection to {}: {refusal}",
-            short(&sandbox.id)
-        ),
+        Err(refusal) => refused(&sandbox.id, &refusal.to_string(), peer, format, &tx).await,
     }
+}
+
+/// Logs a refused connection and, in JSON, reports it as a
+/// `creche.sink.refused` line, outside any stream.
+async fn refused(
+    sandbox: &str,
+    reason: &str,
+    peer: Peer,
+    format: Format,
+    tx: &mpsc::Sender<Vec<u8>>,
+) {
+    eprintln!(
+        "creche-sink: refusing a connection to {}: {reason}",
+        short(sandbox)
+    );
+    if format == Format::Json {
+        let mut fields = vec![("creche.sink.refusal", Value::Str(reason))];
+        fields.extend(peer.fields());
+        let mut line = Vec::new();
+        sink_event(
+            &Origin::from(sandbox),
+            "creche.sink.refused",
+            now_ns(),
+            None,
+            &fields,
+            &mut line,
+        );
+        let _ = tx.send(line).await;
+    }
+}
+
+/// The process at the other end of a connection, as the kernel reports it.
+#[derive(Clone, Copy, Debug)]
+struct Peer {
+    pid: Option<i32>,
+    uid: Option<u32>,
+}
+
+impl Peer {
+    /// `creche.peer.pid` and `creche.peer.uid`, for those known.
+    fn fields(self) -> Vec<(&'static str, Value<'static>)> {
+        let pid = self
+            .pid
+            .and_then(|pid| u64::try_from(pid).ok())
+            .map(|pid| ("creche.peer.pid", Value::Num(pid)));
+        let uid = self
+            .uid
+            .map(|uid| ("creche.peer.uid", Value::Num(u64::from(uid))));
+        pid.into_iter().chain(uid).collect()
+    }
+}
+
+/// A new stream id, unique across connections and sink restarts: the sink's
+/// start time in hex and a counter.
+fn stream_id() -> String {
+    static START: OnceLock<u64> = OnceLock::new();
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let start = START.get_or_init(now_ns);
+    format!("{start:x}-{}", COUNT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// What the host attests about `sandbox`: its id and, when a bundle directory is
@@ -241,35 +304,65 @@ async fn origin(sandbox: &Sandbox) -> (Origin, Option<Containers>) {
 }
 
 /// Decodes one connection until it closes or turns out to be corrupt.
+///
+/// The stream starts with a `creche.stream.start` line naming its peer and ends
+/// with a `creche.stream.end` line saying why, then the last audit checkpoint.
 async fn receive(
     mut stream: UnixStream,
     origin: Origin,
     containers: Option<Containers>,
+    peer: Peer,
     format: Format,
     tx: mpsc::Sender<Vec<u8>>,
 ) {
-    let mut decoder = StreamDecoder::new(format);
+    let origin = origin.with_stream(&stream_id());
+    let mut decoder = StreamDecoder::new(format).with_audit();
     if let Some(containers) = containers {
         decoder = decoder.with_containers(containers);
     }
+    let mut lines = Vec::new();
+    decoder.event(
+        &origin,
+        "creche.stream.start",
+        now_ns(),
+        &peer.fields(),
+        &mut lines,
+    );
+    if !lines.is_empty() && tx.send(lines).await.is_err() {
+        return;
+    }
     let mut chunk = vec![0; READ_CHUNK];
-    loop {
+    let reason = loop {
         let n = match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break "closed",
+            Err(_) => break "read_error",
             Ok(n) => n,
         };
         let mut lines = Vec::new();
-        if let Err(e) = decoder.feed(chunk.get(..n).unwrap_or_default(), &origin, &mut lines) {
+        let fed = decoder.feed(chunk.get(..n).unwrap_or_default(), &origin, &mut lines);
+        // Lines decoded before a corrupt record are still sent.
+        if !lines.is_empty() && tx.send(lines).await.is_err() {
+            return;
+        }
+        if let Err(e) = fed {
             eprintln!(
                 "creche-sink: dropping corrupt stream from {}: {e}",
                 short(origin.id())
             );
-            break;
+            break "corrupt";
         }
-        if !lines.is_empty() && tx.send(lines).await.is_err() {
-            break;
-        }
-    }
+    };
+    let mut lines = Vec::new();
+    let now = now_ns();
+    decoder.event(
+        &origin,
+        "creche.stream.end",
+        now,
+        &[("creche.stream.end_reason", Value::Str(reason))],
+        &mut lines,
+    );
+    decoder.finish(&origin, now, &mut lines);
+    let _ = tx.send(lines).await;
 }
 
 /// Writes batches in arrival order, flushing whenever the backlog is empty.
@@ -384,10 +477,26 @@ mod tests {
         matches!(within(stream.read(&mut buf)).await, Ok(0) | Err(_))
     }
 
+    /// The next line that is not the sink's own stream or audit line.
+    async fn record_line(rx: &mut mpsc::Receiver<Vec<u8>>) -> serde_json::Value {
+        loop {
+            let batch = within(rx.recv()).await.unwrap();
+            for line in batch.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+                let v: serde_json::Value = serde_json::from_slice(line).unwrap();
+                let name = v["event.name"].as_str().unwrap_or_default();
+                if !name.starts_with("creche.stream.") && !name.starts_with("creche.audit.") {
+                    return v;
+                }
+            }
+        }
+    }
+
+    /// The first line in the next read from `out`.
     async fn read_line(out: &mut (impl AsyncRead + Unpin)) -> serde_json::Value {
         let mut buf = vec![0; 4096];
         let n = within(out.read(&mut buf)).await.unwrap();
-        serde_json::from_slice(&buf[..n]).unwrap()
+        let first = buf[..n].split(|&b| b == b'\n').next().unwrap();
+        serde_json::from_slice(first).unwrap()
     }
 
     #[test]
@@ -416,8 +525,7 @@ mod tests {
                 .await
                 .unwrap();
             guest.write_all(heartbeat().as_bytes()).await.unwrap();
-            let lines = within(rx.recv()).await.unwrap();
-            let line: serde_json::Value = serde_json::from_slice(&lines).unwrap();
+            let line = record_line(&mut rx).await;
             assert_eq!(line["creche.sandbox.id"], "0123456789abcdef");
             assert_eq!(line["event.name"], "creche.observer.heartbeat");
 
@@ -465,16 +573,54 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_stream_is_dropped_without_output() {
+    fn a_corrupt_stream_ends_with_its_reason_and_last_checkpoint() {
         runtime().block_on(async {
             let (tx, mut rx) = mpsc::channel(8);
             let (mut guest, host) = UnixStream::pair().unwrap();
-            let task = tokio::spawn(receive(host, Origin::from("sb"), None, Format::Json, tx));
+            let task = tokio::spawn(receive(
+                host,
+                Origin::from("sb"),
+                None,
+                Peer {
+                    pid: None,
+                    uid: None,
+                },
+                Format::Json,
+                tx,
+            ));
+            // One good record, then a corrupt one.
             let mut bad = heartbeat();
             bad.header.len = 3;
-            guest.write_all(bad.as_bytes()).await.unwrap();
+            guest
+                .write_all(&[heartbeat().as_bytes(), bad.as_bytes()].concat())
+                .await
+                .unwrap();
             within(task).await.unwrap();
-            assert!(rx.try_recv().is_err());
+            let mut output = Vec::new();
+            while let Ok(batch) = rx.try_recv() {
+                output.extend(batch);
+            }
+            let names: Vec<String> = output
+                .split(|&b| b == b'\n')
+                .filter(|l| !l.is_empty())
+                .map(|l| {
+                    let v: serde_json::Value = serde_json::from_slice(l).unwrap();
+                    assert!(v["creche.stream.id"].is_string());
+                    format!("{} {}", v["event.name"], v["creche.stream.end_reason"])
+                })
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "\"creche.stream.start\" null",
+                    "\"creche.observer.heartbeat\" null",
+                    "\"creche.stream.end\" \"corrupt\"",
+                    "\"creche.audit.checkpoint\" null",
+                ]
+            );
+            let report = crate::audit::verify(&output);
+            assert!(report.intact(), "{report:?}");
+            assert!(report.streams.values().all(|s| s.ended && s.verified == 3));
         });
     }
 
@@ -504,6 +650,18 @@ mod tests {
             let mut intruder = connect(&tmp).await;
             intruder.write_all(heartbeat().as_bytes()).await.unwrap();
             assert!(closed(&mut intruder).await);
+            // Reported, with the intruder's pid, outside any stream.
+            let refused = within(rx.recv()).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&refused).unwrap();
+            assert_eq!(v["event.name"], "creche.sink.refused");
+            assert_eq!(v["creche.peer.pid"], std::process::id());
+            assert!(
+                v["creche.sink.refusal"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not the sandbox's VMM")
+            );
+            assert!(v.get("creche.stream.id").is_none());
             assert!(rx.try_recv().is_err());
         });
     }
@@ -516,11 +674,14 @@ mod tests {
             for _ in 0..MAX_CONNECTIONS {
                 let mut guest = connect(&tmp).await;
                 guest.write_all(heartbeat().as_bytes()).await.unwrap();
-                within(rx.recv()).await.unwrap();
+                record_line(&mut rx).await;
                 open.push(guest);
             }
             let mut extra = connect(&tmp).await;
             assert!(closed(&mut extra).await);
+            let v = record_line(&mut rx).await;
+            assert_eq!(v["event.name"], "creche.sink.refused");
+            assert_eq!(v["creche.sink.refusal"], "4 connections already open");
 
             // Closing one makes room again.
             drop(open.pop());
@@ -528,16 +689,20 @@ mod tests {
                 loop {
                     let mut guest = connect(&tmp).await;
                     guest.write_all(heartbeat().as_bytes()).await.unwrap();
-                    if let Ok(Some(_)) =
-                        tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
-                    {
+                    let line =
+                        tokio::time::timeout(Duration::from_millis(100), record_line(&mut rx))
+                            .await;
+                    if line.is_ok_and(|v| v["event.name"] == "creche.observer.heartbeat") {
                         break guest;
                     }
                 }
             })
             .await;
             guest.write_all(heartbeat().as_bytes()).await.unwrap();
-            within(rx.recv()).await.unwrap();
+            assert_eq!(
+                record_line(&mut rx).await["event.name"],
+                "creche.observer.heartbeat"
+            );
         });
     }
 
@@ -616,13 +781,23 @@ mod tests {
                     .await
                     .unwrap();
                 guest.write_all(heartbeat().as_bytes()).await.unwrap();
-                let lines = within(rx.recv()).await.unwrap();
-                let line: serde_json::Value = serde_json::from_slice(&lines).unwrap();
+                let line = record_line(&mut rx).await;
                 assert_eq!(line["creche.sandbox.id"], id);
                 assert_eq!(line["k8s.pod.name"].as_str().unwrap_or(""), pod);
                 assert_eq!(line["creche.k8s.unresolved"], unresolved);
             }
         });
+    }
+
+    #[test]
+    fn stream_ids_are_unique_and_share_the_sink_start() {
+        let (a, b) = (stream_id(), stream_id());
+        assert_ne!(a, b);
+        let (start_a, n_a) = a.split_once('-').unwrap();
+        let (start_b, n_b) = b.split_once('-').unwrap();
+        assert_eq!(start_a, start_b);
+        assert!(u64::from_str_radix(start_a, 16).unwrap() > 0);
+        assert!(n_b.parse::<u64>().unwrap() > n_a.parse::<u64>().unwrap());
     }
 
     #[test]

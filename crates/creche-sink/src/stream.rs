@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use creche_wire::{Body, DecodeError, Records};
 
-use crate::json::{self, Origin};
+use crate::audit::Chain;
+use crate::json::{self, Origin, Value};
 use crate::k8s::Containers;
 use crate::tasks::{TaskInfo, Tasks};
 
@@ -30,10 +31,28 @@ pub struct StreamDecoder {
     format: Format,
     /// Incomplete record carried over from the previous input.
     pending: Vec<u8>,
-    /// Context of the stream's processes, from its task records (JSON only).
+    /// What JSON rendering keeps across inputs.
+    json: JsonState,
+    /// The stream's audit chain, when enabled (JSON only).
+    chain: Option<Chain>,
+}
+
+/// What JSON rendering keeps across inputs.
+#[derive(Debug, Default)]
+struct JsonState {
+    /// Context of the stream's processes, from its task records.
     tasks: Tasks,
     /// Checks the containers the guest claims, when its pod is known.
     containers: Option<Containers>,
+    /// The next line's `creche.seq`.
+    seq: u64,
+}
+
+/// Returns `*seq` and advances it.
+fn next(seq: &mut u64) -> u64 {
+    let current = *seq;
+    *seq = current.saturating_add(1);
+    current
 }
 
 impl StreamDecoder {
@@ -50,8 +69,58 @@ impl StreamDecoder {
     /// claims it and `containers` confirms it.
     #[must_use]
     pub fn with_containers(mut self, containers: Containers) -> Self {
-        self.containers = Some(containers);
+        self.json.containers = Some(containers);
         self
+    }
+
+    /// Also keeps an audit chain over the JSON lines, with a checkpoint line
+    /// whenever one falls due (see [`crate::audit`]).
+    #[must_use]
+    pub fn with_audit(mut self) -> Self {
+        self.chain = Some(Chain::default());
+        self
+    }
+
+    /// Writes an event the sink reports about this stream, such as its start or
+    /// end, as the stream's next line. Nothing in the raw format.
+    pub fn event(
+        &mut self,
+        origin: &Origin,
+        name: &str,
+        observed_ns: u64,
+        fields: &[(&str, Value<'_>)],
+        out: &mut Vec<u8>,
+    ) {
+        if self.format != Format::Json {
+            return;
+        }
+        let start = out.len();
+        let seq = next(&mut self.json.seq);
+        json::sink_event(origin, name, observed_ns, Some(seq), fields, out);
+        self.audit(origin, observed_ns, start, out);
+    }
+
+    /// Writes the last checkpoint, covering every line so far. For when the
+    /// stream ends.
+    pub fn finish(&mut self, origin: &Origin, observed_ns: u64, out: &mut Vec<u8>) {
+        if let Some(chain) = &mut self.chain {
+            chain.checkpoint(origin, observed_ns, out);
+        }
+    }
+
+    /// Hashes the lines written to `out` since `start`, then writes a checkpoint
+    /// if one is due.
+    fn audit(&mut self, origin: &Origin, observed_ns: u64, start: usize, out: &mut Vec<u8>) {
+        if let Some(chain) = &mut self.chain {
+            chain.absorb(
+                out.get(start..).unwrap_or_default(),
+                self.json.seq,
+                observed_ns,
+            );
+            if chain.due(observed_ns) {
+                chain.checkpoint(origin, observed_ns, out);
+            }
+        }
     }
 
     /// Decodes the complete records available after appending `data` and writes
@@ -84,32 +153,30 @@ impl StreamDecoder {
         out: &mut Vec<u8>,
     ) -> Result<(), DecodeError> {
         let format = self.format;
-        if self.pending.is_empty() {
-            let used = write_all(
-                format,
-                data,
-                origin,
-                observed_ns,
-                &mut self.tasks,
-                &mut self.containers,
-                out,
-            )?;
-            self.pending
-                .extend_from_slice(data.get(used..).unwrap_or_default());
+        let start = out.len();
+        // Lines written before a corrupt record are valid and stay in `out`,
+        // so they are hashed either way.
+        let result = if self.pending.is_empty() {
+            write_all(format, data, origin, observed_ns, &mut self.json, out).map(|used| {
+                self.pending
+                    .extend_from_slice(data.get(used..).unwrap_or_default());
+            })
         } else {
             self.pending.extend_from_slice(data);
-            let used = write_all(
+            write_all(
                 format,
                 &self.pending,
                 origin,
                 observed_ns,
-                &mut self.tasks,
-                &mut self.containers,
+                &mut self.json,
                 out,
-            )?;
-            self.pending.drain(..used);
+            )
+            .map(|used| drop(self.pending.drain(..used)))
+        };
+        if format == Format::Json {
+            self.audit(origin, observed_ns, start, out);
         }
-        Ok(())
+        result
     }
 
     /// Bytes of an incomplete record waiting for more input.
@@ -120,7 +187,7 @@ impl StreamDecoder {
 }
 
 /// Nanoseconds since the Unix epoch, 0 if the clock is before it.
-fn now_ns() -> u64 {
+pub(crate) fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
@@ -132,12 +199,11 @@ fn write_all(
     buf: &[u8],
     origin: &Origin,
     observed_ns: u64,
-    tasks: &mut Tasks,
-    containers: &mut Option<Containers>,
+    state: &mut JsonState,
     out: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
     match format {
-        Format::Json => render_all(buf, origin, observed_ns, tasks, containers, out),
+        Format::Json => render_all(buf, origin, observed_ns, state, out),
         Format::Raw => frame_all(buf, origin.id(), out),
     }
 }
@@ -148,8 +214,7 @@ fn render_all(
     buf: &[u8],
     origin: &Origin,
     observed_ns: u64,
-    tasks: &mut Tasks,
-    containers: &mut Option<Containers>,
+    state: &mut JsonState,
     out: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
     let mut records = Records::new(buf);
@@ -159,24 +224,30 @@ fn render_all(
         match record.body {
             Body::Task { context, cgroup } => {
                 let mut info = TaskInfo::new(&context, cgroup);
-                if let Some(containers) = containers.as_mut() {
+                if let Some(containers) = state.containers.as_mut() {
                     info.container = containers.claim(&info.cgroup);
                 }
-                tasks.set(pid, info);
+                state.tasks.set(pid, info);
             }
             Body::Exec { context, .. } => {
-                tasks.exec(pid, &context);
-                json::render(origin, &record, tasks.get(pid), observed_ns, out);
+                state.tasks.exec(pid, &context);
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
             }
             Body::Fork { ppid } => {
-                tasks.fork(ppid, pid);
-                json::render(origin, &record, tasks.get(pid), observed_ns, out);
+                state.tasks.fork(ppid, pid);
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
             }
             Body::Exit { .. } => {
-                json::render(origin, &record, tasks.get(pid), observed_ns, out);
-                tasks.exit(pid);
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                state.tasks.exit(pid);
             }
-            _ => json::render(origin, &record, tasks.get(pid), observed_ns, out),
+            _ => {
+                let seq = next(&mut state.seq);
+                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+            }
         }
     }
     Ok(records.consumed())
@@ -460,6 +531,59 @@ mod tests {
                 .iter()
                 .all(|v| v.get("creche.guest.container.id").is_none())
         );
+    }
+
+    #[test]
+    fn audited_streams_number_their_lines_and_verify() {
+        let origin = Origin::from("sb").with_stream("s1");
+        let mut d = StreamDecoder::new(Format::Json).with_audit();
+        let mut out = Vec::new();
+        d.event(&origin, "creche.stream.start", 1, &[], &mut out);
+        // 300 heartbeats in uneven chunks: one checkpoint falls due by count.
+        let data = stream(300);
+        for part in data.chunks(1000) {
+            d.feed_at(part, &origin, 2, &mut out).unwrap();
+        }
+        d.event(
+            &origin,
+            "creche.stream.end",
+            3,
+            &[("creche.stream.end_reason", Value::Str("closed"))],
+            &mut out,
+        );
+        d.finish(&origin, 3, &mut out);
+
+        let l = lines(&out);
+        let seqs: Vec<u64> = l.iter().filter_map(|v| v["creche.seq"].as_u64()).collect();
+        assert_eq!(seqs, (0..302).collect::<Vec<_>>());
+        let checkpoints: Vec<_> = l
+            .iter()
+            .filter(|v| v["event.name"] == "creche.audit.checkpoint")
+            .map(|v| {
+                (
+                    v["creche.seq.first"].as_u64(),
+                    v["creche.seq.last"].as_u64(),
+                )
+            })
+            .collect();
+        // The first falls due inside a chunk and is written after it.
+        let [(Some(0), Some(cut)), (Some(next), Some(301))] = checkpoints[..] else {
+            panic!("{checkpoints:?}");
+        };
+        assert!(cut >= 255 && next == cut + 1, "{checkpoints:?}");
+        let report = crate::audit::verify(&out);
+        assert!(report.intact(), "{report:?}");
+        assert_eq!(report.streams["s1"].verified, 302);
+    }
+
+    #[test]
+    fn raw_streams_have_no_sink_events() {
+        let origin = Origin::from("sb").with_stream("s1");
+        let mut d = StreamDecoder::new(Format::Raw).with_audit();
+        let mut out = Vec::new();
+        d.event(&origin, "creche.stream.start", 1, &[], &mut out);
+        d.finish(&origin, 1, &mut out);
+        assert_eq!(out, b"");
     }
 
     #[test]

@@ -116,6 +116,7 @@ creche-observer --stdout | creche-sink -f -    # local capture and decode
 creche-sink -o raw              # the records unchanged, in frames naming their sandbox
 creche-sink -b /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io   # k3s keeps containerd's state here
 creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
+creche-sink --verify out.jsonl  # check the audit chains in saved output
 ```
 
 ## Output
@@ -143,6 +144,19 @@ the pipelines they already feed.
   `creche.file.open_write`, `creche.observer.hello` and
   `creche.observer.heartbeat`. `observed_time_unix_nano` is the host's clock when
   the event arrived: the guest only knows its own boot time.
+- **Audit trail** (JSON only): each connection is a stream with its own
+  `creche.stream.id`, opened by a `creche.stream.start` line naming the peer
+  (`creche.peer.pid`, `creche.peer.uid`) and closed by `creche.stream.end` with
+  `creche.stream.end_reason` (`closed`, `read_error` or `corrupt`). Every line of a
+  stream has `creche.seq`, counting from 0. A `creche.audit.checkpoint` line
+  follows once 256 lines or a second have passed and when the stream ends. It
+  covers `creche.seq.first` to `creche.seq.last` with
+  `creche.audit.hash = SHA-256(creche.audit.prev || the exact bytes of those lines)`,
+  starting from 32 zero bytes. A missing line shows as a gap in `creche.seq`, a
+  changed one as a mismatched hash. `creche-sink --verify FILE` checks saved
+  output. Refused connections are `creche.sink.refused` lines, outside any stream,
+  with the peer and `creche.sink.refusal`. The chain proves integrity only as far
+  as its checkpoints are kept out of reach, for example shipped to a second store.
 - **Raw** (`-o raw`): the validated wire records unchanged, for consumers that
   decode the creche format themselves (`creche-wire`). Each frame is a
   native-endian `u16` length and the sandbox id, then a native-endian `u32` length
