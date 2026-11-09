@@ -22,7 +22,17 @@ the node of each sandbox from outside the sink's output, from the cluster's pod
 history: lines of a pod uid, or a sandbox id when there is no pod, and a node
 name. The expected sink IDs are templates holding `{node}`. A stream must be
 signed by the template filled in with the node its pod or sandbox ran on, and a
-stream whose sandbox is missing from the history fails.
+stream whose sandbox is missing from the history fails, as does one whose pod
+and sandbox the history places on different nodes.
+
+The start line's signature covers the stream's key, not the sandbox it names,
+so the node counts only once a signed checkpoint covers the start line. Every
+line of a stream must name the same sandbox and pod, so a sink cannot open a
+stream for a sandbox on its own node and then write lines for one elsewhere.
+
+A node name can return on a new machine. Where that happens, the node's uid
+takes the name's place, in the sink IDs and in the history alike, so a sink of
+an earlier machine cannot sign for its successor's sandboxes.
 
 ## Alternatives
 
@@ -37,5 +47,7 @@ stream whose sandbox is missing from the history fails.
 Taking over one node lets an attacker sign streams only for the sandboxes the
 history places on that node. Verifying needs a pod history that covers the
 streams, kept as long as the output, and node names that are DNS subdomains so
-they fit a SPIFFE ID path. The sink does not change. Sink registrations that
-match several agents, through a shared node selector, undo the binding.
+they fit a SPIFFE ID path, which node uids are too. Lines after the last
+checkpoint stay unproven, as before. The sink does not change. Sink
+registrations that match several agents, through a shared node selector, undo
+the binding.
