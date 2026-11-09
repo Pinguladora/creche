@@ -19,9 +19,15 @@ run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warn
 description = "Licenses, advisories, bans and sources (cargo-deny)"
 run = "cargo deny --locked check"
 
+[tasks."ci:fuzz"]
+description = "Check that the fuzz workspace builds against the current crates, with its lockfile current"
+# The fuzz crate is a workspace of its own, so nothing else builds it. --locked
+# also fails when a crate gains a dependency and fuzz/Cargo.lock was not updated.
+run = "cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked"
+
 [tasks."ci:check"]
-description = "Full CI gate: format, clippy, cargo-deny, then the tests (which build the BPF object)"
-depends = ["ci:fmt", "ci:clippy", "ci:deny"]
+description = "Full CI gate: format, clippy, cargo-deny, the fuzz workspace, then the tests (which build the BPF object)"
+depends = ["ci:fmt", "ci:clippy", "ci:deny", "ci:fuzz"]
 run = "mise run test"
 
 [tasks."ci:trivy"]
