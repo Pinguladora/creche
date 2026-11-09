@@ -306,8 +306,9 @@ struct Entry {
     key_sig: Option<String>,
 }
 
-/// A checkpoint as read back.
-#[derive(PartialEq, Eq)]
+/// A checkpoint as read back. It orders by place first, then by every
+/// other field, so identical copies sort next to each other.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct Checkpoint {
     first: u64,
     last: u64,
@@ -530,7 +531,7 @@ fn check(
     let before = lines.len().saturating_add(checkpoints.len());
     lines.sort_unstable();
     lines.dedup();
-    checkpoints.sort_by(|a, b| (a.first, a.last, &a.hash).cmp(&(b.first, b.last, &b.hash)));
+    checkpoints.sort_unstable();
     checkpoints.dedup();
     let after = lines.len().saturating_add(checkpoints.len());
     status.duplicates = u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX);
@@ -730,6 +731,27 @@ mod tests {
             report.streams["s1"].problems,
             ["two different checkpoints start at line 0"]
         );
+    }
+
+    #[test]
+    fn a_repeat_around_a_conflicting_checkpoint_is_still_counted() {
+        let out = String::from_utf8(stream(10)).unwrap();
+        let checkpoint = out
+            .lines()
+            .find(|l| l.contains("creche.audit.checkpoint"))
+            .unwrap();
+        // Same place and hash, a different prev: the copies of the real
+        // checkpoint must still meet, so the repeat counts once.
+        let tag = "\"creche.audit.prev\":\"";
+        let at = checkpoint.find(tag).unwrap() + tag.len();
+        let mut other = checkpoint.to_owned();
+        let flipped = if &other[at..=at] == "0" { "1" } else { "0" };
+        other.replace_range(at..=at, flipped);
+        let forged = format!("{out}{other}\n{checkpoint}\n");
+        let report = verify(forged.as_bytes(), None);
+        let s = &report.streams["s1"];
+        assert_eq!(s.duplicates, 1);
+        assert_eq!(s.problems, ["two different checkpoints start at line 0"]);
     }
 
     #[test]
