@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use creche_wire::Context;
 
+use crate::json::Cgroup;
 use crate::k8s::Container;
 
 /// Most processes tracked per stream. Exits remove them, so this is only reached
@@ -27,6 +28,8 @@ pub struct TaskInfo {
     /// The pod's container the guest claims for that cgroup, when the host
     /// confirms it belongs to this sandbox.
     pub container: Option<Arc<Container>>,
+    /// The cgroup's path and labels, when the observer described it.
+    pub cgroup_info: Option<Arc<Cgroup>>,
 }
 
 impl TaskInfo {
@@ -41,12 +44,42 @@ impl TaskInfo {
             comm: lossy(context.comm),
             cgroup: lossy(cgroup),
             container: None,
+            cgroup_info: None,
         }
     }
 }
 
 fn lossy(bytes: &[u8]) -> Arc<str> {
     String::from_utf8_lossy(bytes).into()
+}
+
+/// Most cgroups kept per stream. A guest has a few dozen. The bound only keeps
+/// one stream from growing the sink without end.
+const MAX_CGROUPS: usize = 4096;
+
+/// The cgroups a stream's observer described, by id.
+#[derive(Debug, Default)]
+pub struct Cgroups {
+    by_id: HashMap<u64, Arc<Cgroup>>,
+}
+
+impl Cgroups {
+    /// The cgroup `id`, if the observer described it.
+    #[must_use]
+    pub fn get(&self, id: u64) -> Option<Arc<Cgroup>> {
+        self.by_id.get(&id).cloned()
+    }
+
+    /// Records the cgroup `id`, replacing any earlier description.
+    pub fn set(&mut self, id: u64, cgroup: Cgroup) {
+        if self.by_id.len() >= MAX_CGROUPS
+            && !self.by_id.contains_key(&id)
+            && let Some(&evict) = self.by_id.keys().next()
+        {
+            self.by_id.remove(&evict);
+        }
+        self.by_id.insert(id, Arc::new(cgroup));
+    }
 }
 
 /// Process contexts by pid.
@@ -84,12 +117,19 @@ impl Tasks {
         }
     }
 
-    /// An exec record's context replaces all but the cgroup name, which only
-    /// task records carry. The guest sends one first when the name changed.
+    /// An exec record's context replaces all but the cgroup name and what
+    /// follows from it, which only task records carry. The guest sends one
+    /// first when the cgroup changed.
     pub fn exec(&mut self, pid: u32, context: &Context<'_>) {
-        let (cgroup, container) = self.by_pid.get(&pid).map_or_else(
-            || (Arc::from(""), None),
-            |known| (Arc::clone(&known.cgroup), known.container.clone()),
+        let (cgroup, container, cgroup_info) = self.by_pid.get(&pid).map_or_else(
+            || (Arc::from(""), None, None),
+            |known| {
+                (
+                    Arc::clone(&known.cgroup),
+                    known.container.clone(),
+                    known.cgroup_info.clone(),
+                )
+            },
         );
         let comm = match self.by_pid.get(&pid) {
             Some(known) if known.comm.as_bytes() == context.comm => Arc::clone(&known.comm),
@@ -104,6 +144,7 @@ impl Tasks {
                 comm,
                 cgroup,
                 container,
+                cgroup_info,
             },
         );
     }
@@ -132,6 +173,7 @@ mod tests {
             comm: comm.into(),
             cgroup: "cri-containerd-x.scope".into(),
             container: None,
+            cgroup_info: None,
         }
     }
 
@@ -204,5 +246,23 @@ mod tests {
         tasks.set(u32::MAX, info(1, "z"));
         assert_eq!(tasks.len(), MAX_TASKS);
         assert!(tasks.get(u32::MAX).is_some());
+    }
+
+    #[test]
+    fn the_cgroup_map_stays_bounded() {
+        let cgroup = |path: &str| Cgroup::new(path.as_bytes(), 0, creche_wire::Labels::default());
+        let mut cgroups = Cgroups::default();
+        for id in 0..u64::try_from(MAX_CGROUPS).unwrap() {
+            cgroups.set(id, cgroup("/x"));
+        }
+        assert_eq!(cgroups.by_id.len(), MAX_CGROUPS);
+        // Replacing a known id needs no room.
+        cgroups.set(0, cgroup("/y"));
+        assert_eq!(cgroups.by_id.len(), MAX_CGROUPS);
+        assert_eq!(&*cgroups.get(0).unwrap().path, "/y");
+        // A new id evicts one.
+        cgroups.set(u64::MAX, cgroup("/z"));
+        assert_eq!(cgroups.by_id.len(), MAX_CGROUPS);
+        assert!(cgroups.get(u64::MAX).is_some());
     }
 }

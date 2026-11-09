@@ -208,7 +208,7 @@ impl Containers {
 
     /// The container a process in guest cgroup `cgroup` runs in, if the claim
     /// holds. Blocking on the first claim of each cgroup name.
-    pub fn claim(&mut self, cgroup: &Arc<str>) -> Option<Arc<Container>> {
+    pub fn claim(&mut self, cgroup: &str) -> Option<Arc<Container>> {
         if let Some(known) = self.claims.get(cgroup) {
             return known.clone();
         }
@@ -226,7 +226,7 @@ impl Containers {
                     name,
                 })
             });
-        self.claims.insert(Arc::clone(cgroup), found.clone());
+        self.claims.insert(Arc::from(cgroup), found.clone());
         found
     }
 }

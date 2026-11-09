@@ -61,10 +61,23 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   the bundle must be owned by root and private to it. Otherwise every line says
   why the pod is unknown, and nothing is guessed.
 - **The container is the guest's claim, checked.** A process's guest cgroup
-  (`cri-containerd-<id>.scope`) claims a container. The sink reports it as
-  `creche.guest.container.*` only when that id is a container of the same pod in
-  the runtime's bundles, so a guest cannot point at another pod. Root in the
-  guest can still move a process between its own pod's containers.
+  (`cri-containerd-<id>.scope`), or the deepest such cgroup on its path, claims
+  a container. The sink reports it as `creche.guest.container.*` only when that
+  id is a container of the same pod in the runtime's bundles, so a guest cannot
+  point at another pod. Root in the guest can still move a process between its
+  own pod's containers.
+- **Agents label their own cgroups.** Where several agents share a pod, the
+  runtime gives each a delegated cgroup owned by the agent's uid, and the agent
+  labels it with `user.creche.agent.<key>` extended attributes, such as
+  `user.creche.agent.name`, before any process moves in. Only the cgroup's owner
+  (or root) can set them. The first time a record names a cgroup, the observer
+  sends its path and labels, taking a child cgroup's from its nearest labelled
+  ancestor, and the sink reports them on every line from that cgroup as
+  `creche.guest.agent.<key>` claims next to `creche.cgroup.label_owner.uid`, the
+  owner of the cgroup they came from. Keys are up to 32 lowercase letters,
+  digits, `_`, `-` and `.`, values up to 128 bytes of UTF-8 without control
+  characters, and up to 8 labels. Labels changed later apply from the next
+  connection.
 - **Layout guard.** `build.rs` generates C static assertions from `creche-wire`'s
   layout, so a wire struct mismatch between C and Rust fails the build.
 
@@ -163,8 +176,10 @@ the pipelines they already feed.
   `creche.` namespace: `creche.sandbox.id`, `creche.k8s.unresolved` (why a
   sandbox's pod is unknown), `creche.guest.container.id` and
   `creche.guest.container.name` (the container the guest claims, confirmed to be
-  in the pod), `creche.cgroup.id`,
-  `creche.cgroup.name`, `creche.boot_time_ns` (the guest's boot-time clock) and
+  in the pod), `creche.cgroup.id`, `creche.cgroup.name`, `creche.cgroup.path`
+  (from the cgroup v2 root), `creche.guest.agent.<key>` and
+  `creche.cgroup.label_owner.uid` (an agent's labels, see above),
+  `creche.boot_time_ns` (the guest's boot-time clock) and
   the observer's own figures. Event names (`event.name`) are `creche.process.exec`,
   `creche.process.fork`, `creche.process.exit`, `creche.network.connect`,
   `creche.file.open_write`, `creche.observer.hello` and
