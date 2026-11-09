@@ -228,6 +228,10 @@ impl HelloFlags {
     pub const DEDUP: Self = Self(1);
     /// The kernel lacks fentry support: only exec, fork and exit are reported.
     pub const PROCESS_ONLY: Self = Self(2);
+    /// Only the observer can connect to the host on its port: a BPF LSM program
+    /// refuses every other guest process. Without it, any guest process could
+    /// send records the host takes for the observer's.
+    pub const GUARDED: Self = Self(4);
 
     /// Raw bit value.
     #[must_use]
