@@ -6,6 +6,7 @@
 //! at most one incomplete record. Output batches are bounded by a channel.
 
 pub mod json;
+pub mod k8s;
 pub mod listen;
 pub mod peer;
 pub mod stream;

@@ -3,6 +3,7 @@
 //! JSON of bounded size, and raw frames carry the input unchanged.
 #![no_main]
 
+use creche_sink::json::Origin;
 use creche_sink::stream::{Format, StreamDecoder};
 use libfuzzer_sys::fuzz_target;
 
@@ -14,10 +15,11 @@ const MAX_LINE: usize = 8 * 1024;
 /// output and whether the stream was found corrupt.
 fn feed(format: Format, data: &[u8], chunk: usize) -> (Vec<u8>, bool) {
     let mut decoder = StreamDecoder::new(format);
+    let origin = Origin::from("sb");
     let mut out = Vec::new();
     let size = if chunk == 0 { data.len().max(1) } else { chunk };
     for part in data.chunks(size) {
-        if decoder.feed_at(part, "sb", 1, &mut out).is_err() {
+        if decoder.feed_at(part, &origin, 1, &mut out).is_err() {
             return (out, true);
         }
     }

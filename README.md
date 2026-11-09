@@ -54,6 +54,12 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   The sandbox id on every line comes from the host, never from the guest. What
   the guest reports inside the stream is the guest's claim. Sandbox ids must be
   containerd identifiers, and each sandbox gets at most 4 connections.
+- **The host names the pod.** When a connection is accepted, the sink reads the
+  sandbox's OCI spec from containerd's root-only bundle directory and takes the
+  pod's name, namespace and uid from the annotations containerd sets from
+  kubelet's request. The spec must name the same sandbox and be a sandbox's, and
+  the bundle must be private to root or the sink's user. Otherwise every line says
+  why the pod is unknown, and nothing is guessed.
 - **Layout guard.** `build.rs` generates C static assertions from `creche-wire`'s
   layout, so a wire struct mismatch between C and Rust fails the build.
 
@@ -125,6 +131,8 @@ creche-sink                     # on the host, as root or the VMM's user: listen
 creche-observer                 # in the guest (systemd unit before kata-agent)
 creche-observer --stdout | creche-sink -f -    # local capture and decode
 creche-sink -o raw              # the records unchanged, in frames naming their sandbox
+creche-sink -b /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io   # k3s keeps containerd's state here
+creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
 ```
 
 ## Output
@@ -139,8 +147,11 @@ the pipelines they already feed.
   `process.pid`, `process.parent_pid`, `process.real_user.id`,
   `process.executable.name`, `process.executable.path`, `process.command_args`
   (an array), `process.exit.code`, `file.path`, `destination.address`,
-  `destination.port`, `network.type`, `network.transport`. The rest are in the
-  `creche.` namespace: `creche.sandbox.id`, `creche.cgroup.id`,
+  `destination.port`, `network.type`, `network.transport`, and
+  `k8s.pod.name`, `k8s.namespace.name` and `k8s.pod.uid` for sandboxes that are
+  pods. The rest are in the
+  `creche.` namespace: `creche.sandbox.id`, `creche.k8s.unresolved` (why a
+  sandbox's pod is unknown), `creche.cgroup.id`,
   `creche.cgroup.name`, `creche.boot_time_ns` (the guest's boot-time clock) and
   the observer's own figures. Event names (`event.name`) are `creche.process.exec`,
   `creche.process.fork`, `creche.process.exit`, `creche.network.connect`,
@@ -151,7 +162,7 @@ the pipelines they already feed.
   decode the creche format themselves (`creche-wire`). Each frame is a
   native-endian `u16` length and the sandbox id, then a native-endian `u32` length
   and that many bytes of whole records. Task records are included, so a consumer
-  can track process context itself.
+  can track process context itself. Frames name the sandbox, not its pod.
 
 ## Working with coding agents
 

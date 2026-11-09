@@ -7,29 +7,26 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 
-use creche_sink::listen;
+use creche_sink::k8s::CONTAINERD_BUNDLES;
+use creche_sink::listen::{self, Options};
 use creche_sink::stream::{Format, StreamDecoder};
 
 const USAGE: &str = "\
-usage: creche-sink [-d DIR] [-p PORT] [-o json|raw]
+usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
        creche-sink -f FILE|- [-o json|raw]
   -d, --dir DIR      directory of Kata sandboxes (default /run/vc/vm)
   -p, --port PORT    vsock port the observers connect to (default 7000)
+  -b, --bundles DIR  containerd bundles, to name each sandbox's pod
+                     (default /run/containerd/io.containerd.runtime.v2.task/k8s.io)
+      --no-pods      do not look up pods
   -f, --file FILE    decode a captured stream (- for stdin) and exit
   -o, --output FMT   json: one JSON line per event, OpenTelemetry attribute names (default)
                      raw: the records unchanged, in frames naming their sandbox";
 
 #[derive(Debug)]
 enum Mode {
-    Listen {
-        dir: PathBuf,
-        port: u32,
-        format: Format,
-    },
-    Decode {
-        file: PathBuf,
-        format: Format,
-    },
+    Listen { dir: PathBuf, options: Options },
+    Decode { file: PathBuf, format: Format },
 }
 
 fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
@@ -37,6 +34,7 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
 
     let mut dir = PathBuf::from("/run/vc/vm");
     let mut port = 7000;
+    let mut bundles = Some(PathBuf::from(CONTAINERD_BUNDLES));
     let mut file = None;
     let mut format = Format::Json;
     let mut parser = lexopt::Parser::from_env();
@@ -44,6 +42,8 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
         match arg {
             Short('d') | Long("dir") => dir = parser.value()?.into(),
             Short('p') | Long("port") => port = parser.value()?.parse()?,
+            Short('b') | Long("bundles") => bundles = Some(parser.value()?.into()),
+            Long("no-pods") => bundles = None,
             Short('f') | Long("file") => file = Some(PathBuf::from(parser.value()?)),
             Short('o') | Long("output") => {
                 format = match parser.value()?.to_str() {
@@ -58,7 +58,14 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
     }
     Ok(Some(match file {
         Some(file) => Mode::Decode { file, format },
-        None => Mode::Listen { dir, port, format },
+        None => Mode::Listen {
+            dir,
+            options: Options {
+                port,
+                format,
+                bundles,
+            },
+        },
     }))
 }
 
@@ -76,7 +83,7 @@ fn main() -> ExitCode {
     };
     let result = match mode {
         Mode::Decode { file, format } => decode_file(&file, format),
-        Mode::Listen { dir, port, format } => listen(dir, port, format),
+        Mode::Listen { dir, options } => listen(dir, options),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -87,14 +94,14 @@ fn main() -> ExitCode {
     }
 }
 
-fn listen(dir: PathBuf, port: u32, format: Format) -> Result<()> {
+fn listen(dir: PathBuf, options: Options) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .context("starting the runtime")?;
     runtime
-        .block_on(listen::run(dir, port, format))
+        .block_on(listen::run(dir, options))
         .context("writing output")
 }
 
@@ -110,7 +117,7 @@ fn decode_file(file: &PathBuf, format: Format) -> Result<()> {
     let mut decoder = StreamDecoder::new(format);
     let mut lines = Vec::new();
     decoder
-        .feed(&data, "file", &mut lines)
+        .feed(&data, &"file".into(), &mut lines)
         .context("decoding")?;
     io::stdout()
         .lock()
