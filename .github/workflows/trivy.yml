@@ -1,0 +1,66 @@
+name: Trivy
+
+# Scans the tree with Trivy (trivy.yaml): known vulnerabilities in every
+# lockfile, misconfigurations and licences. It runs on every pull request so a
+# HIGH or CRITICAL finding with a fix available blocks the merge, on every push to
+# main, and weekly, because new advisories appear without any change here. The
+# findings also go to code scanning as SARIF.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 2" # Every Tuesday at 06:00 UTC
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Trivy scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout
+      security-events: write # upload the SARIF to code scanning
+    env:
+      MISE_ENV: ci
+      # Run the task with Trivy installed below, not the Rust toolchain.
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          disable-telemetry: "true"
+          disable-sudo: "true"
+          allowed-endpoints: >
+            github.com:443 api.github.com:443 codeload.github.com:443 objects.githubusercontent.com:443 release-assets.githubusercontent.com:443 raw.githubusercontent.com:443 mise.jdx.dev:443 mirror.gcr.io:443 ghcr.io:443 pkg-containers.githubusercontent.com:443 rekor.sigstore.dev:443 *.actions.githubusercontent.com:443 *.blob.core.windows.net:443
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up mise
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: trivy
+      - name: Cache the Trivy databases
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/trivy
+          # A new key every run that restores the latest one, so the databases
+          # stay cached and Trivy only fetches what changed since.
+          key: trivy-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-${{ runner.os }}-
+      - name: Scan
+        run: mise run ci:trivy
+      - name: Upload the findings to code scanning
+        if: ${{ !cancelled() }}
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
