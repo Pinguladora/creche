@@ -104,6 +104,10 @@ pub fn render(
         line.str(key!("process.executable.name"), &t.comm);
         line.num(key!("creche.cgroup.id"), t.cgroup_id);
         line.str(key!("creche.cgroup.name"), &t.cgroup);
+        if let Some(c) = &t.container {
+            line.str(key!("creche.guest.container.id"), &c.id);
+            line.str(key!("creche.guest.container.name"), &c.name);
+        }
     }
     match record.body {
         Body::Exec { path, args, .. } => {
@@ -352,6 +356,7 @@ mod tests {
             cgroup_id: 7,
             comm: "wget".into(),
             cgroup: "cri-containerd-x.scope".into(),
+            container: None,
         }
     }
 

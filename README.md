@@ -54,6 +54,11 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   kubelet's request. The spec must name the same sandbox and be a sandbox's, and
   the bundle must be private to root or the sink's user. Otherwise every line says
   why the pod is unknown, and nothing is guessed.
+- **The container is the guest's claim, checked.** A process's guest cgroup
+  (`cri-containerd-<id>.scope`) claims a container. The sink reports it as
+  `creche.guest.container.*` only when that id is a container of the same pod in
+  the runtime's bundles, so a guest cannot point at another pod. Root in the
+  guest can still move a process between its own pod's containers.
 - **Layout guard.** `build.rs` generates C static assertions from `creche-wire`'s
   layout, so a wire struct mismatch between C and Rust fails the build.
 
@@ -129,7 +134,9 @@ the pipelines they already feed.
   `k8s.pod.name`, `k8s.namespace.name` and `k8s.pod.uid` for sandboxes that are
   pods. The rest are in the
   `creche.` namespace: `creche.sandbox.id`, `creche.k8s.unresolved` (why a
-  sandbox's pod is unknown), `creche.cgroup.id`,
+  sandbox's pod is unknown), `creche.guest.container.id` and
+  `creche.guest.container.name` (the container the guest claims, confirmed to be
+  in the pod), `creche.cgroup.id`,
   `creche.cgroup.name`, `creche.boot_time_ns` (the guest's boot-time clock) and
   the observer's own figures. Event names (`event.name`) are `creche.process.exec`,
   `creche.process.fork`, `creche.process.exit`, `creche.network.connect`,
