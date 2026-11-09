@@ -62,11 +62,63 @@ impl Origin {
         }
     }
 
+    /// The same origin, naming the stream `stream` on every line, so lines can
+    /// be grouped and their audit chain checked per stream.
+    #[must_use]
+    pub fn with_stream(self, stream: &str) -> Self {
+        let mut json = self.json.into_vec();
+        json.extend_from_slice(key!("creche.stream.id"));
+        push_json_str(&mut json, stream);
+        Self {
+            id: self.id,
+            json: json.into(),
+        }
+    }
+
     /// The sandbox id.
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
+}
+
+/// A value in an event the sink reports about itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Value<'a> {
+    /// A string, escaped as needed.
+    Str(&'a str),
+    /// An unsigned integer.
+    Num(u64),
+}
+
+/// Appends an event the sink reports about itself, such as a stream starting or
+/// a refused connection, as one JSON line. `seq` is the line's place in its
+/// stream, when it belongs to one. `fields` are written in order, after the
+/// common ones. Their names must not need escaping.
+pub fn sink_event(
+    origin: &Origin,
+    name: &str,
+    observed_ns: u64,
+    seq: Option<u64>,
+    fields: &[(&str, Value<'_>)],
+    out: &mut Vec<u8>,
+) {
+    let mut line = Line::start(out, origin);
+    line.str(key!("event.name"), name);
+    if let Some(seq) = seq {
+        line.num(key!("creche.seq"), seq);
+    }
+    line.num(key!("observed_time_unix_nano"), observed_ns);
+    for (name, value) in fields {
+        line.out.extend_from_slice(b",\"");
+        line.out.extend_from_slice(name.as_bytes());
+        line.out.extend_from_slice(b"\":");
+        match value {
+            Value::Str(s) => push_json_str(line.out, s),
+            Value::Num(n) => push_u64(line.out, *n),
+        }
+    }
+    line.end();
 }
 
 impl From<&str> for Origin {
@@ -90,11 +142,13 @@ pub fn render(
     record: &Record<'_>,
     task: Option<&TaskInfo>,
     observed_ns: u64,
+    seq: u64,
     out: &mut Vec<u8>,
 ) {
     let h = &record.header;
     let mut line = Line::start(out, origin);
     line.str(key!("event.name"), event_name(h.kind));
+    line.num(key!("creche.seq"), seq);
     line.num(key!("observed_time_unix_nano"), observed_ns);
     line.num(key!("creche.boot_time_ns"), h.ts_ns);
     line.num(key!("process.pid"), h.pid);
@@ -375,6 +429,7 @@ mod tests {
             },
             task,
             42,
+            0,
             &mut out,
         );
         assert_eq!(out.last(), Some(&b'\n'));
@@ -583,6 +638,7 @@ mod tests {
             },
             None,
             42,
+            0,
             &mut out,
         );
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -698,6 +754,7 @@ mod tests {
             },
             None,
             42,
+            0,
             &mut out,
         );
         serde_json::from_slice(&out).unwrap()
@@ -741,6 +798,7 @@ mod tests {
             },
             None,
             42,
+            0,
             &mut out,
         );
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();

@@ -21,6 +21,7 @@ creche-wire.workspace = true
 anyhow.workspace = true
 lexopt.workspace = true
 miniserde.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
