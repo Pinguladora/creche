@@ -307,6 +307,7 @@ struct Entry {
 }
 
 /// A checkpoint as read back.
+#[derive(PartialEq, Eq)]
 struct Checkpoint {
     first: u64,
     last: u64,
@@ -336,6 +337,10 @@ pub struct StreamReport {
     pub verified: u64,
     /// Whether the stream's end event is present.
     pub ended: bool,
+    /// Byte-identical repeats of a line or checkpoint, dropped before checking.
+    /// A retry after a lost response delivers lines twice, which is no sign of
+    /// tampering.
+    pub duplicates: u64,
     /// The SPIFFE ID that signed the stream, when its signatures hold.
     pub signer: Option<String>,
     /// Whether the signer's SVID was checked against a trust bundle.
@@ -515,22 +520,39 @@ fn first_key(
 /// each checkpoint's signature with the key the one before it named.
 fn check(
     stream: &str,
-    lines: &mut [(u64, &[u8])],
-    checkpoints: &mut [Checkpoint],
+    lines: &mut Vec<(u64, &[u8])>,
+    checkpoints: &mut Vec<Checkpoint>,
     mut key: Option<VerifyingKey>,
     status: &mut StreamReport,
 ) {
-    lines.sort_by_key(|(seq, _)| *seq);
+    // Byte-identical repeats go. Two different lines or checkpoints for the
+    // same place stay, and fail below.
+    let before = lines.len().saturating_add(checkpoints.len());
+    lines.sort_unstable();
+    lines.dedup();
+    checkpoints.sort_by(|a, b| (a.first, a.last, &a.hash).cmp(&(b.first, b.last, &b.hash)));
+    checkpoints.dedup();
+    let after = lines.len().saturating_add(checkpoints.len());
+    status.duplicates = u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX);
     status.lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
     for (expected, (seq, _)) in (0_u64..).zip(lines.iter()) {
         if *seq != expected {
-            status
-                .problems
-                .push(format!("expected line {expected}, found {seq}"));
+            let problem = if expected.checked_sub(1) == Some(*seq) {
+                format!("two different lines claim line {seq}")
+            } else {
+                format!("expected line {expected}, found {seq}")
+            };
+            status.problems.push(problem);
             return;
         }
     }
-    checkpoints.sort_by_key(|c| c.first);
+    if let Some(pair) = checkpoints.windows(2).find(|w| w[0].first == w[1].first) {
+        status.problems.push(format!(
+            "two different checkpoints start at line {}",
+            pair[0].first
+        ));
+        return;
+    }
     let mut prev = [0_u8; 32];
     let mut next = 0_u64;
     for checkpoint in checkpoints.iter() {
@@ -663,6 +685,70 @@ mod tests {
         assert_eq!(
             (s.lines, s.verified, s.checkpoints, s.ended),
             (601, 601, 3, true)
+        );
+    }
+
+    #[test]
+    fn repeated_deliveries_are_not_tampering() {
+        let out = stream(300);
+        let l = lines(&out);
+        // A retried batch: lines and a checkpoint delivered twice.
+        let repeated = [l.concat(), l[100..260].concat()].concat();
+        let report = verify(&repeated, None);
+        let s = &report.streams["s1"];
+        assert!(report.intact(), "{report:?}");
+        assert_eq!((s.lines, s.verified, s.duplicates), (301, 301, 160));
+    }
+
+    #[test]
+    fn two_different_lines_for_one_place_still_fail() {
+        let out = String::from_utf8(stream(10)).unwrap();
+        let line3 = out.lines().nth(3).unwrap();
+        let forged = format!("{out}{}\n", line3.replace("creche.test", "creche.tesT"));
+        let report = verify(forged.as_bytes(), None);
+        assert_eq!(
+            report.streams["s1"].problems,
+            ["two different lines claim line 3"]
+        );
+    }
+
+    #[test]
+    fn two_different_checkpoints_for_one_range_fail() {
+        let out = String::from_utf8(stream(10)).unwrap();
+        let checkpoint = out
+            .lines()
+            .find(|l| l.contains("creche.audit.checkpoint"))
+            .unwrap();
+        let tag = "\"creche.audit.hash\":\"";
+        let at = checkpoint.find(tag).unwrap() + tag.len();
+        let mut other = checkpoint.to_owned();
+        let flipped = if &other[at..=at] == "0" { "1" } else { "0" };
+        other.replace_range(at..=at, flipped);
+        let forged = format!("{out}{other}\n");
+        let report = verify(forged.as_bytes(), None);
+        assert_eq!(
+            report.streams["s1"].problems,
+            ["two different checkpoints start at line 0"]
+        );
+    }
+
+    #[test]
+    fn a_one_line_checkpoint_is_valid_and_a_backwards_one_is_not() {
+        // 257 lines: a checkpoint for the first 256, then one for the last line.
+        let out = stream(256);
+        let report = verify(&out, None);
+        assert!(report.intact(), "{report:?}");
+        assert!(
+            String::from_utf8_lossy(&out)
+                .contains("\"creche.seq.first\":256,\"creche.seq.last\":256,")
+        );
+
+        let text = String::from_utf8(stream(600)).unwrap();
+        let backwards = text.replacen("\"creche.seq.last\":511,", "\"creche.seq.last\":100,", 1);
+        assert_ne!(backwards, text);
+        assert_eq!(
+            verify(backwards.as_bytes(), None).streams["s1"].problems,
+            ["checkpoint covers 256 to 100, expected one from 256"]
         );
     }
 

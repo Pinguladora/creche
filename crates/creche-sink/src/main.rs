@@ -214,6 +214,9 @@ fn verify(file: &PathBuf, bundle: Option<&PathBuf>, sinks: Vec<String>) -> Resul
             s.checkpoints,
             if s.ended { "ended" } else { "open" }
         )?;
+        if s.duplicates > 0 {
+            writeln!(out, "  {} repeated deliveries dropped", s.duplicates)?;
+        }
         match &s.signer {
             Some(id) if s.trusted => writeln!(out, "  signed by {id}, trusted by the bundle")?,
             Some(id) => writeln!(out, "  signed by {id}, not checked against a trust bundle")?,
