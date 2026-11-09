@@ -195,8 +195,10 @@ mod tests {
             .expect("timed out")
     }
 
-    fn test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("creche-sink-{name}-{}", std::process::id()))
+    /// A fresh private directory, removed when dropped. Created atomically, so
+    /// nothing another user plants under the temp root is followed.
+    fn test_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     fn heartbeat() -> HeartbeatRecord {
@@ -215,19 +217,20 @@ mod tests {
     #[test]
     fn listens_only_once_the_vmm_socket_exists_and_stops_when_the_sandbox_goes() {
         runtime().block_on(async {
-            let dir = test_dir("scan");
+            let tmp = test_dir();
+            let dir = tmp.path();
             let sandbox = dir.join("0123456789abcdef");
             tokio::fs::create_dir_all(&sandbox).await.unwrap();
             let (tx, mut rx) = mpsc::channel(8);
             let mut listeners = HashMap::new();
 
-            scan(&dir, 7000, Format::Json, &mut listeners, &tx).await;
+            scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
             assert!(listeners.is_empty(), "no clh.sock yet");
 
             tokio::fs::write(sandbox.join("clh.sock"), b"")
                 .await
                 .unwrap();
-            scan(&dir, 7000, Format::Json, &mut listeners, &tx).await;
+            scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
             assert_eq!(listeners.len(), 1);
 
             let mut guest = UnixStream::connect(sandbox.join("clh.sock_7000"))
@@ -240,16 +243,16 @@ mod tests {
             assert_eq!(line["event.name"], "creche.observer.heartbeat");
 
             tokio::fs::remove_dir_all(&sandbox).await.unwrap();
-            scan(&dir, 7000, Format::Json, &mut listeners, &tx).await;
+            scan(dir, 7000, Format::Json, &mut listeners, &tx).await;
             assert!(listeners.is_empty());
-            tokio::fs::remove_dir_all(&dir).await.unwrap();
         });
     }
 
     #[test]
     fn run_writes_lines_until_its_output_fails() {
         runtime().block_on(async {
-            let dir = test_dir("run");
+            let tmp = test_dir();
+            let dir = tmp.path().to_path_buf();
             let sandbox = dir.join("fedcba9876543210");
             tokio::fs::create_dir_all(&sandbox).await.unwrap();
             tokio::fs::write(sandbox.join("clh.sock"), b"")
@@ -274,7 +277,6 @@ mod tests {
             drop(reader);
             guest.write_all(heartbeat().as_bytes()).await.unwrap();
             assert!(within(server).await.unwrap().is_err());
-            tokio::fs::remove_dir_all(&dir).await.unwrap();
         });
     }
 
@@ -295,9 +297,8 @@ mod tests {
     #[test]
     fn dropping_a_listener_removes_its_socket() {
         runtime().block_on(async {
-            let dir = test_dir("drop");
-            tokio::fs::create_dir_all(&dir).await.unwrap();
-            let socket = dir.join("clh.sock_7002");
+            let tmp = test_dir();
+            let socket = tmp.path().join("clh.sock_7002");
             let listener = UnixListener::bind(&socket).unwrap();
             let task = tokio::spawn(async move {
                 let _ = listener.accept().await;
@@ -307,7 +308,6 @@ mod tests {
                 socket: socket.clone(),
             });
             assert!(!socket.exists());
-            tokio::fs::remove_dir_all(&dir).await.unwrap();
         });
     }
 
