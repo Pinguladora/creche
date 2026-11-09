@@ -54,7 +54,7 @@ jobs:
           scope: Pinguladora/creche
           identity: release
       - name: Set up mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install: true
           cache: false
@@ -120,7 +120,7 @@ jobs:
           scope: Pinguladora/creche
           identity: verify
       - name: Set up mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           # Verifying needs only slsa-verifier, not the Rust toolchain.
           install_args: aqua:slsa-framework/slsa-verifier
