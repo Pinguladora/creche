@@ -18,7 +18,7 @@ const USAGE: &str = "\
 usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
                    [--otlp URL [--otlp-protocol grpc|http]] [--spiffe-socket PATH]
        creche-sink -f FILE|- [-o json|raw]
-       creche-sink --verify FILE|- [--bundle PEM]
+       creche-sink --verify FILE|- [--bundle PEM --spiffe-id ID...]
   -d, --dir DIR      directory of Kata sandboxes (default /run/vc/vm)
   -p, --port PORT    vsock port the observers connect to (default 7000)
   -b, --bundles DIR  containerd bundles, to name each sandbox's pod
@@ -35,7 +35,9 @@ usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
       --verify FILE  check the audit chains in saved JSON output (- for stdin) and exit,
                      with status 1 when a stream does not add up
       --bundle PEM   with --verify: require every stream to be signed by an SVID that
-                     chains to this SPIFFE trust bundle (spire-server bundle show)";
+                     chains to this SPIFFE trust bundle (spire-server bundle show)
+      --spiffe-id ID with --bundle: a sink allowed to sign, repeatable. Required, since
+                     any workload in the trust domain could otherwise sign";
 
 #[derive(Debug)]
 enum Mode {
@@ -50,6 +52,7 @@ enum Mode {
     Verify {
         file: PathBuf,
         bundle: Option<PathBuf>,
+        sinks: Vec<String>,
     },
 }
 
@@ -62,6 +65,7 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
     let mut file = None;
     let mut verify = None;
     let mut bundle = None;
+    let mut sinks = Vec::new();
     let mut spiffe = None;
     let mut otlp = None;
     let mut protocol = Protocol::Grpc;
@@ -76,6 +80,7 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
             Short('f') | Long("file") => file = Some(PathBuf::from(parser.value()?)),
             Long("verify") => verify = Some(PathBuf::from(parser.value()?)),
             Long("bundle") => bundle = Some(PathBuf::from(parser.value()?)),
+            Long("spiffe-id") => sinks.push(parser.value()?.string()?),
             Long("spiffe-socket") => spiffe = Some(PathBuf::from(parser.value()?)),
             Long("otlp") => otlp = Some(parser.value()?.string()?),
             Long("otlp-protocol") => {
@@ -107,7 +112,16 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
         None => None,
     };
     Ok(Some(match (verify, file) {
-        (Some(file), _) => Mode::Verify { file, bundle },
+        (Some(file), _) => {
+            if bundle.is_some() == sinks.is_empty() {
+                return Err("--bundle and --spiffe-id go together".into());
+            }
+            Mode::Verify {
+                file,
+                bundle,
+                sinks,
+            }
+        }
         (None, Some(file)) => Mode::Decode { file, format },
         (None, None) => Mode::Listen {
             dir,
@@ -137,7 +151,11 @@ fn main() -> ExitCode {
     let result = match mode {
         Mode::Decode { file, format } => decode_file(&file, format),
         Mode::Listen { dir, options } => listen(dir, options),
-        Mode::Verify { file, bundle } => match verify(&file, bundle.as_ref()) {
+        Mode::Verify {
+            file,
+            bundle,
+            sinks,
+        } => match verify(&file, bundle.as_ref(), sinks) {
             Ok(true) => Ok(()),
             Ok(false) => return ExitCode::from(1),
             Err(e) => Err(e),
@@ -177,14 +195,15 @@ fn read_input(file: &PathBuf) -> Result<Vec<u8>> {
 }
 
 /// Prints what [`audit::verify`] found in `file`. Whether every stream is intact.
-fn verify(file: &PathBuf, bundle: Option<&PathBuf>) -> Result<bool> {
+fn verify(file: &PathBuf, bundle: Option<&PathBuf>, sinks: Vec<String>) -> Result<bool> {
     let bundle = bundle
         .map(|path| {
             let pem = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
             TrustBundle::from_pem(&pem).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
         })
         .transpose()?;
-    let report = audit::verify(&read_input(file)?, bundle.as_ref());
+    let trust = bundle.map(|bundle| audit::Trust { bundle, sinks });
+    let report = audit::verify(&read_input(file)?, trust.as_ref());
     let mut out = io::stdout().lock();
     for (stream, s) in &report.streams {
         writeln!(

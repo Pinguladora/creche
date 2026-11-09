@@ -363,14 +363,25 @@ impl Report {
     }
 }
 
+/// Who may have signed the streams a verifier checks.
+#[derive(Clone, Debug)]
+pub struct Trust {
+    /// The SPIFFE trust bundle SVIDs must chain to.
+    pub bundle: TrustBundle,
+    /// The SPIFFE IDs of the sinks expected to sign. Any other workload with an
+    /// SVID from the same trust domain could otherwise sign a made-up stream.
+    pub sinks: Vec<String>,
+}
+
 /// Checks the audit chains in `output`, the bytes the sink wrote. Lines of
 /// different streams may be interleaved and each stream's lines may be in any
 /// order, but their bytes must be unchanged.
 ///
-/// With a trust `bundle`, every stream must be signed by an SVID that chains to
-/// it. Without one, signatures are still checked, but not whom they belong to.
+/// With `trust`, every stream must be signed by an SVID of one of its sinks that
+/// chains to its bundle. Without it, signatures are still checked, but not whom
+/// they belong to.
 #[must_use]
-pub fn verify(output: &[u8], bundle: Option<&TrustBundle>) -> Report {
+pub fn verify(output: &[u8], trust: Option<&Trust>) -> Report {
     let mut report = Report::default();
     let mut lines: BTreeMap<String, Vec<(u64, &[u8])>> = BTreeMap::new();
     let mut checkpoints: BTreeMap<String, Vec<Checkpoint>> = BTreeMap::new();
@@ -438,11 +449,11 @@ pub fn verify(output: &[u8], bundle: Option<&TrustBundle>) -> Report {
     for (stream, status) in &mut report.streams {
         let mut stream_lines = lines.remove(stream).unwrap_or_default();
         let mut stream_checkpoints = checkpoints.remove(stream).unwrap_or_default();
-        let key = match (starts.remove(stream), bundle) {
-            (Some(start), _) => match first_key(stream, &start, bundle) {
+        let key = match (starts.remove(stream), trust) {
+            (Some(start), _) => match first_key(stream, &start, trust) {
                 Ok((signer, key)) => {
                     status.signer = Some(signer);
-                    status.trusted = bundle.is_some();
+                    status.trusted = trust.is_some();
                     Some(key)
                 }
                 Err(problem) => {
@@ -473,14 +484,20 @@ pub fn verify(output: &[u8], bundle: Option<&TrustBundle>) -> Report {
 fn first_key(
     stream: &str,
     start: &Start,
-    bundle: Option<&TrustBundle>,
+    trust: Option<&Trust>,
 ) -> Result<(String, VerifyingKey), String> {
     let chain = Base64::decode_vec(&start.svid).map_err(|_| "the SVID is not base64".to_owned())?;
-    let (id, svid_key) = match bundle {
-        Some(bundle) => bundle
-            .verify(&chain, start.observed_ns / 1_000_000_000)
-            .map(|(id, key)| (Some(id), key))
-            .map_err(|e| format!("the SVID is not trusted: {e}"))?,
+    let (id, svid_key) = match trust {
+        Some(trust) => {
+            let (id, key) = trust
+                .bundle
+                .verify(&chain, start.observed_ns / 1_000_000_000)
+                .map_err(|e| format!("the SVID is not trusted: {e}"))?;
+            if !trust.sinks.contains(&id) {
+                return Err(format!("signed by {id}, which is not an expected sink"));
+            }
+            (Some(id), key)
+        }
         None => spiffe::leaf_key(&chain).map_err(|e| format!("the SVID does not parse: {e}"))?,
     };
     if id.as_deref() != Some(start.spiffe_id.as_str()) {
@@ -765,8 +782,16 @@ mod tests {
         Svid::from_der("spiffe://creche.test/sink", chain, key).unwrap()
     }
 
-    fn bundle() -> TrustBundle {
-        TrustBundle::from_pem(include_bytes!("../tests/fixtures/spiffe/bundle.pem")).unwrap()
+    fn trust(sinks: &[&str]) -> Trust {
+        Trust {
+            bundle: TrustBundle::from_pem(include_bytes!("../tests/fixtures/spiffe/bundle.pem"))
+                .unwrap(),
+            sinks: sinks.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    fn bundle() -> Trust {
+        trust(&["spiffe://creche.test/sink"])
     }
 
     /// 2027-01-15, inside the fixtures' validity, in nanoseconds.
@@ -916,6 +941,24 @@ mod tests {
         );
         // The foreign SVID's own signatures are fine without a bundle.
         assert!(verify(&out, None).intact());
+    }
+
+    #[test]
+    fn only_expected_sinks_may_sign() {
+        let (out, _) = signed_stream(10, &sink_svid());
+        let report = verify(&out, Some(&trust(&["spiffe://creche.test/other"])));
+        assert_eq!(
+            report.streams["s1"].problems,
+            ["signed by spiffe://creche.test/sink, which is not an expected sink"]
+        );
+        let report = verify(
+            &out,
+            Some(&trust(&[
+                "spiffe://creche.test/other",
+                "spiffe://creche.test/sink",
+            ])),
+        );
+        assert!(report.intact());
     }
 
     #[test]

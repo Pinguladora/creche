@@ -118,7 +118,7 @@ creche-sink -b /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io   # k3s 
 creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
 creche-sink --verify out.jsonl  # check the audit chains in saved output
 creche-sink --spiffe-socket /run/spire/agent.sock   # sign every stream with the sink's SVID
-creche-sink --verify out.jsonl --bundle bundle.pem  # and check the signers against the trust bundle
+creche-sink --verify out.jsonl --bundle bundle.pem --spiffe-id spiffe://example.org/creche-sink
 creche-sink --otlp http://127.0.0.1:4317 > archive.jsonl   # export to a node collector, keep an archive
 ```
 
@@ -167,8 +167,10 @@ the pipelines they already feed.
   key (`creche.audit.sig`) and names the next one (`creche.audit.next_key`),
   derived from the current key and the checkpoint hash, and the current key is
   then erased. Whoever takes over the sink later cannot sign earlier checkpoints
-  again. `creche-sink --verify FILE --bundle bundle.pem` checks that every stream
-  is signed by an SVID chaining to the SPIFFE trust bundle at the stream's start.
+  again. `creche-sink --verify FILE --bundle bundle.pem --spiffe-id ID` checks that
+  every stream is signed by one of the given sink SPIFFE IDs, with an SVID that
+  chained to the trust bundle at the stream's start. The IDs are required: any
+  other workload in the trust domain has an SVID too.
 - **OpenTelemetry logs** (`--otlp URL`, with JSON output): the same lines,
   also exported to a collector as OTLP over gRPC (`--otlp-protocol grpc`, the
   default, port 4317) or OTLP/HTTP (`--otlp-protocol http`, port 4318), protobuf
