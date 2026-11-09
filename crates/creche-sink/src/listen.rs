@@ -519,8 +519,11 @@ mod tests {
             .expect("timed out")
     }
 
-    /// A fresh private directory, removed when dropped. Created atomically, so
-    /// nothing another user plants under the temp root is followed.
+    /// A fresh directory, removed when dropped. Created atomically under a new,
+    /// unpredictable name, so files another user planted in advance are not
+    /// followed. Its mode follows the umask, so others may read it, and under a
+    /// shared temp root without the sticky bit another user could still replace
+    /// it afterwards.
     fn test_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
