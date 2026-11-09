@@ -22,13 +22,13 @@ and other documents are welcome.
 | [0006 Process context once, from a pid slot cache](0006-context-once.md) | Accepted |
 | [0007 One wakeup per batch](0007-one-wakeup-per-batch.md) | Accepted |
 | [0008 OpenTelemetry JSON lines and raw frames](0008-output-formats.md) | Accepted |
-| [0009 The host attests the sandbox](0009-host-attests-the-sandbox.md) | Proposed |
-| [0010 The pod comes from the container runtime's bundle](0010-pod-from-the-runtime-bundle.md) | Proposed |
-| [0011 Identity within a pod: cgroup and uid per agent](0011-identity-within-a-pod.md) | Proposed |
-| [0012 Numbered streams chained with SHA-256 checkpoints](0012-audit-chain.md) | Proposed |
-| [0013 OTLP export over gRPC with zstd, the line as the body](0013-otlp-export.md) | Proposed |
-| [0014 Checkpoints signed with a ratchet anchored to a SPIFFE SVID](0014-signed-checkpoints.md) | Proposed |
-| [0015 The observer guards its vsock port with BPF LSM](0015-observer-guards-its-port.md) | Proposed |
+| [0009 The host attests the sandbox](0009-host-attests-the-sandbox.md) | Accepted |
+| [0010 The pod comes from the container runtime's bundle](0010-pod-from-the-runtime-bundle.md) | Accepted |
+| [0011 Identity within a pod: cgroup and uid per agent](0011-identity-within-a-pod.md) | Accepted |
+| [0012 Numbered streams chained with SHA-256 checkpoints](0012-audit-chain.md) | Accepted |
+| [0013 OTLP export over gRPC with zstd, the line as the body](0013-otlp-export.md) | Accepted |
+| [0014 Checkpoints signed with a ratchet anchored to a SPIFFE SVID](0014-signed-checkpoints.md) | Accepted |
+| [0015 The observer guards its vsock port with BPF LSM](0015-observer-guards-its-port.md) | Accepted |
 
 ## Writing a record
 

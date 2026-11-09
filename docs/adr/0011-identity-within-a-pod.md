@@ -1,6 +1,6 @@
 # 0011. Identity within a pod: cgroup and uid per agent
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context

@@ -1,6 +1,6 @@
 # 0015. The observer guards its vsock port with BPF LSM
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context

@@ -1,6 +1,6 @@
 # 0012. Numbered streams chained with SHA-256 checkpoints
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context

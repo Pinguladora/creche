@@ -1,6 +1,6 @@
 # 0013. OTLP export over gRPC with zstd, the line as the body
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context

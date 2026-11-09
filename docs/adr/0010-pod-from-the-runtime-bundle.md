@@ -1,6 +1,6 @@
 # 0010. The pod comes from the container runtime's bundle
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context

@@ -1,6 +1,6 @@
 # 0009. The host attests the sandbox
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context
