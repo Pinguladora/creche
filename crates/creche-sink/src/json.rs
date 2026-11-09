@@ -19,6 +19,9 @@ macro_rules! key {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Origin {
     id: Box<str>,
+    /// Attribute names and values, in line order.
+    attributes: Vec<(&'static str, Box<str>)>,
+    /// The attributes rendered as the start of a JSON object.
     json: Box<[u8]>,
 }
 
@@ -37,48 +40,70 @@ impl Origin {
     /// The origin of a stream from sandbox `id`.
     #[must_use]
     pub fn new(id: &str, attribution: &Attribution) -> Self {
-        let mut json = b"{\"creche.sandbox.id\":".to_vec();
-        push_json_str(&mut json, id);
+        let mut attributes: Vec<(&'static str, Box<str>)> = vec![("creche.sandbox.id", id.into())];
         match attribution {
             Attribution::None => {}
-            Attribution::Pod(pod) => {
-                for (key, value) in [
-                    (key!("k8s.pod.name"), &pod.name),
-                    (key!("k8s.namespace.name"), &pod.namespace),
-                    (key!("k8s.pod.uid"), &pod.uid),
-                ] {
-                    json.extend_from_slice(key);
-                    push_json_str(&mut json, value);
-                }
-            }
+            Attribution::Pod(pod) => attributes.extend([
+                ("k8s.pod.name", (*pod.name).into()),
+                ("k8s.namespace.name", (*pod.namespace).into()),
+                ("k8s.pod.uid", (*pod.uid).into()),
+            ]),
             Attribution::Unresolved(why) => {
-                json.extend_from_slice(key!("creche.k8s.unresolved"));
-                push_json_str(&mut json, why.as_str());
+                attributes.push(("creche.k8s.unresolved", why.as_str().into()));
             }
         }
         Self {
             id: id.into(),
-            json: json.into(),
+            json: render_attributes(&attributes),
+            attributes,
         }
     }
 
     /// The same origin, naming the stream `stream` on every line, so lines can
     /// be grouped and their audit chain checked per stream.
     #[must_use]
-    pub fn with_stream(self, stream: &str) -> Self {
-        let mut json = self.json.into_vec();
-        json.extend_from_slice(key!("creche.stream.id"));
-        push_json_str(&mut json, stream);
-        Self {
-            id: self.id,
-            json: json.into(),
-        }
+    pub fn with_stream(mut self, stream: &str) -> Self {
+        self.attributes.push(("creche.stream.id", stream.into()));
+        self.json = render_attributes(&self.attributes);
+        self
     }
 
     /// The sandbox id.
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Length of the JSON every line from this origin starts with.
+    pub(crate) fn json_len(&self) -> usize {
+        self.json.len()
+    }
+
+    /// The attested attributes every line starts with, as name and value.
+    pub fn attributes(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.attributes.iter().map(|(k, v)| (*k, &**v))
+    }
+}
+
+/// `{"name":"value",...` without the closing brace. Names need no escaping.
+fn render_attributes(attributes: &[(&'static str, Box<str>)]) -> Box<[u8]> {
+    let mut json = vec![b'{'];
+    for (i, (name, value)) in attributes.iter().enumerate() {
+        if i > 0 {
+            json.push(b',');
+        }
+        json.push(b'"');
+        json.extend_from_slice(name.as_bytes());
+        json.extend_from_slice(b"\":");
+        push_json_str(&mut json, value);
+    }
+    json.into()
+}
+
+impl From<&str> for Origin {
+    /// A sandbox id with no pod lookup.
+    fn from(id: &str) -> Self {
+        Self::new(id, &Attribution::None)
     }
 }
 
@@ -119,13 +144,6 @@ pub fn sink_event(
         }
     }
     line.end();
-}
-
-impl From<&str> for Origin {
-    /// A sandbox id with no pod lookup.
-    fn from(id: &str) -> Self {
-        Self::new(id, &Attribution::None)
-    }
 }
 
 /// Appends `record`, from `origin`, to `out` as one JSON object and a newline.

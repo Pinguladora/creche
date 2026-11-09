@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 
 use crate::json::{Attribution, Origin, Value, sink_event};
 use crate::k8s::{self, Containers, Unresolved};
+use crate::otlp::{self, Batch, Endpoint};
 use crate::peer::{self, Refusal};
 use crate::stream::{Format, StreamDecoder, now_ns};
 
@@ -30,6 +31,11 @@ use crate::stream::{Format, StreamDecoder, now_ns};
 const SCAN_INTERVAL: Duration = Duration::from_millis(200);
 /// Rendered batches waiting for the writer. Senders wait when it is full.
 const OUTPUT_BACKLOG: usize = 1024;
+/// Batches waiting for the OTLP exporter. When it is full, batches are dropped
+/// rather than holding up the sink.
+const OTLP_BACKLOG: usize = 1024;
+/// Least time between two reports of lines the exporter dropped.
+const DROP_REPORT: Duration = Duration::from_secs(10);
 /// Read size per connection.
 const READ_CHUNK: usize = 65_536; // 64 KiB
 /// Open connections per sandbox. An observer keeps one, a restarted observer
@@ -48,6 +54,8 @@ pub struct Options {
     /// The container runtime's bundle directory, to find each sandbox's pod.
     /// `None` skips the lookup.
     pub bundles: Option<PathBuf>,
+    /// Where to export the JSON lines as OpenTelemetry logs, besides stdout.
+    pub otlp: Option<Endpoint>,
 }
 
 /// Listens for every sandbox under `dir`, writing to stdout until it fails.
@@ -65,7 +73,13 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (tx, rx) = mpsc::channel(OUTPUT_BACKLOG);
-    let writer = tokio::spawn(write_output(rx, out));
+    let exporter = options.otlp.clone().map(|endpoint| {
+        eprintln!("creche-sink: exporting to {endpoint}");
+        let (otx, orx) = mpsc::channel(OTLP_BACKLOG);
+        tokio::spawn(otlp::export(endpoint, orx));
+        otx
+    });
+    let writer = tokio::spawn(write_output(rx, out, exporter));
     let mut listeners: HashMap<String, Listener> = HashMap::new();
     let mut tick = tokio::time::interval(SCAN_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -94,7 +108,7 @@ async fn scan(
     dir: &Path,
     options: &Options,
     listeners: &mut HashMap<String, Listener>,
-    tx: &mpsc::Sender<Vec<u8>>,
+    tx: &mpsc::Sender<Batch>,
 ) {
     let mut present = Vec::new();
     if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
@@ -166,12 +180,7 @@ struct Sandbox {
     bundles: Option<Arc<Path>>,
 }
 
-async fn accept(
-    listener: UnixListener,
-    sandbox: Sandbox,
-    format: Format,
-    tx: mpsc::Sender<Vec<u8>>,
-) {
+async fn accept(listener: UnixListener, sandbox: Sandbox, format: Format, tx: mpsc::Sender<Batch>) {
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     while let Ok((stream, _)) = listener.accept().await {
         let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
@@ -193,7 +202,7 @@ async fn admit(
     stream: UnixStream,
     sandbox: Sandbox,
     format: Format,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<Batch>,
     _permit: OwnedSemaphorePermit,
 ) {
     let cred = stream.peer_cred().ok();
@@ -224,7 +233,7 @@ async fn refused(
     reason: &str,
     peer: Peer,
     format: Format,
-    tx: &mpsc::Sender<Vec<u8>>,
+    tx: &mpsc::Sender<Batch>,
 ) {
     eprintln!(
         "creche-sink: refusing a connection to {}: {reason}",
@@ -233,16 +242,23 @@ async fn refused(
     if format == Format::Json {
         let mut fields = vec![("creche.sink.refusal", Value::Str(reason))];
         fields.extend(peer.fields());
-        let mut line = Vec::new();
+        let (origin, now) = (Arc::new(Origin::from(sandbox)), now_ns());
+        let mut lines = Vec::new();
         sink_event(
-            &Origin::from(sandbox),
+            &origin,
             "creche.sink.refused",
-            now_ns(),
+            now,
             None,
             &fields,
-            &mut line,
+            &mut lines,
         );
-        let _ = tx.send(line).await;
+        let _ = tx
+            .send(Batch {
+                origin,
+                observed_ns: now,
+                lines,
+            })
+            .await;
     }
 }
 
@@ -313,22 +329,28 @@ async fn receive(
     containers: Option<Containers>,
     peer: Peer,
     format: Format,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<Batch>,
 ) {
-    let origin = origin.with_stream(&stream_id());
+    let origin = Arc::new(origin.with_stream(&stream_id()));
+    let batch = |observed_ns, lines| Batch {
+        origin: Arc::clone(&origin),
+        observed_ns,
+        lines,
+    };
     let mut decoder = StreamDecoder::new(format).with_audit();
     if let Some(containers) = containers {
         decoder = decoder.with_containers(containers);
     }
     let mut lines = Vec::new();
+    let now = now_ns();
     decoder.event(
         &origin,
         "creche.stream.start",
-        now_ns(),
+        now,
         &peer.fields(),
         &mut lines,
     );
-    if !lines.is_empty() && tx.send(lines).await.is_err() {
+    if !lines.is_empty() && tx.send(batch(now, lines)).await.is_err() {
         return;
     }
     let mut chunk = vec![0; READ_CHUNK];
@@ -339,9 +361,11 @@ async fn receive(
             Ok(n) => n,
         };
         let mut lines = Vec::new();
-        let fed = decoder.feed(chunk.get(..n).unwrap_or_default(), &origin, &mut lines);
+        let now = now_ns();
+        let data = chunk.get(..n).unwrap_or_default();
+        let fed = decoder.feed_at(data, &origin, now, &mut lines);
         // Lines decoded before a corrupt record are still sent.
-        if !lines.is_empty() && tx.send(lines).await.is_err() {
+        if !lines.is_empty() && tx.send(batch(now, lines)).await.is_err() {
             return;
         }
         if let Err(e) = fed {
@@ -362,22 +386,64 @@ async fn receive(
         &mut lines,
     );
     decoder.finish(&origin, now, &mut lines);
-    let _ = tx.send(lines).await;
+    let _ = tx.send(batch(now, lines)).await;
 }
 
 /// Writes batches in arrival order, flushing whenever the backlog is empty.
 async fn write_output(
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut rx: mpsc::Receiver<Batch>,
     out: impl AsyncWrite + Unpin,
+    exporter: Option<mpsc::Sender<Batch>>,
 ) -> io::Result<()> {
     let mut out = tokio::io::BufWriter::new(out);
+    let mut dropped = Dropped::default();
     while let Some(batch) = rx.recv().await {
-        out.write_all(&batch).await?;
+        out.write_all(&batch.lines).await?;
         if rx.is_empty() {
             out.flush().await?;
         }
+        if let Some(exporter) = &exporter
+            && let Err(full) = exporter.try_send(batch)
+        {
+            dropped.count(&full.into_inner().lines);
+        }
     }
     out.flush().await
+}
+
+/// Lines the exporter had no room for, reported now and then.
+struct Dropped {
+    lines: u64,
+    reported: tokio::time::Instant,
+}
+
+impl Default for Dropped {
+    fn default() -> Self {
+        Self {
+            lines: 0,
+            reported: tokio::time::Instant::now(),
+        }
+    }
+}
+
+impl Dropped {
+    #[expect(
+        clippy::naive_bytecount,
+        reason = "only runs while the exporter is behind, not worth a dependency"
+    )]
+    fn count(&mut self, lines: &[u8]) {
+        let n = lines.iter().filter(|&&b| b == b'\n').count();
+        self.lines = self
+            .lines
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        if self.reported.elapsed() >= DROP_REPORT {
+            eprintln!(
+                "creche-sink: the OTLP exporter is behind, {} lines dropped so far",
+                self.lines
+            );
+            self.reported = tokio::time::Instant::now();
+        }
+    }
 }
 
 /// The first 12 characters of a sandbox id, for log messages.
@@ -428,6 +494,7 @@ mod tests {
             port: 7000,
             format: Format::Json,
             bundles: bundles.map(Path::to_path_buf),
+            otlp: None,
         }
     }
 
@@ -444,7 +511,7 @@ mod tests {
         tempfile::TempDir,
         Option<std::os::unix::net::UnixListener>,
         HashMap<String, Listener>,
-        mpsc::Receiver<Vec<u8>>,
+        mpsc::Receiver<Batch>,
     ) {
         let tmp = test_dir();
         let sandbox = tmp.path().join("0123456789abcdef");
@@ -478,10 +545,10 @@ mod tests {
     }
 
     /// The next line that is not the sink's own stream or audit line.
-    async fn record_line(rx: &mut mpsc::Receiver<Vec<u8>>) -> serde_json::Value {
+    async fn record_line(rx: &mut mpsc::Receiver<Batch>) -> serde_json::Value {
         loop {
             let batch = within(rx.recv()).await.unwrap();
-            for line in batch.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+            for line in batch.lines.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
                 let v: serde_json::Value = serde_json::from_slice(line).unwrap();
                 let name = v["event.name"].as_str().unwrap_or_default();
                 if !name.starts_with("creche.stream.") && !name.starts_with("creche.audit.") {
@@ -598,7 +665,7 @@ mod tests {
             within(task).await.unwrap();
             let mut output = Vec::new();
             while let Ok(batch) = rx.try_recv() {
-                output.extend(batch);
+                output.extend(batch.lines);
             }
             let names: Vec<String> = output
                 .split(|&b| b == b'\n')
@@ -652,7 +719,7 @@ mod tests {
             assert!(closed(&mut intruder).await);
             // Reported, with the intruder's pid, outside any stream.
             let refused = within(rx.recv()).await.unwrap();
-            let v: serde_json::Value = serde_json::from_slice(&refused).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&refused.lines).unwrap();
             assert_eq!(v["event.name"], "creche.sink.refused");
             assert_eq!(v["creche.peer.pid"], std::process::id());
             assert!(
@@ -798,6 +865,55 @@ mod tests {
         assert_eq!(start_a, start_b);
         assert!(u64::from_str_radix(start_a, 16).unwrap() > 0);
         assert!(n_b.parse::<u64>().unwrap() > n_a.parse::<u64>().unwrap());
+    }
+
+    fn batch_of(lines: &str) -> Batch {
+        Batch {
+            origin: Arc::new(Origin::from("sb")),
+            observed_ns: 1,
+            lines: lines.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn the_exporter_gets_what_fits_and_stdout_gets_everything() {
+        runtime().block_on(async {
+            let (tx, rx) = mpsc::channel(8);
+            let (otx, mut orx) = mpsc::channel(1);
+            let (out, mut reader) = tokio::io::duplex(64 * 1024);
+            for text in ["a\n", "b\nc\n", "d\n"] {
+                tx.send(batch_of(text)).await.unwrap();
+            }
+            drop(tx);
+            write_output(rx, out, Some(otx)).await.unwrap();
+            let mut written = String::new();
+            reader.read_to_string(&mut written).await.unwrap();
+            assert_eq!(written, "a\nb\nc\nd\n");
+            // The exporter queue held one batch. The others were dropped.
+            assert_eq!(orx.recv().await.unwrap().lines, b"a\n");
+            assert!(orx.recv().await.is_none());
+        });
+    }
+
+    #[test]
+    fn dropped_lines_are_counted_and_reported_now_and_then() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut dropped = Dropped::default();
+                let start = dropped.reported;
+                dropped.count(b"abc\nde\n");
+                dropped.count(b"fgh\n");
+                assert_eq!(dropped.lines, 3);
+                assert_eq!(dropped.reported, start, "too soon to report");
+                tokio::time::advance(DROP_REPORT).await;
+                dropped.count(b"");
+                assert_eq!(dropped.lines, 3);
+                assert_eq!(dropped.reported, start + DROP_REPORT, "reported");
+            });
     }
 
     #[test]

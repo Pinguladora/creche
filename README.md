@@ -117,6 +117,7 @@ creche-sink -o raw              # the records unchanged, in frames naming their 
 creche-sink -b /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io   # k3s keeps containerd's state here
 creche-sink --no-pods           # Kata without Kubernetes: no pod lookup
 creche-sink --verify out.jsonl  # check the audit chains in saved output
+creche-sink --otlp http://127.0.0.1:4317 > archive.jsonl   # export to a node collector, keep an archive
 ```
 
 ## Output
@@ -157,6 +158,16 @@ the pipelines they already feed.
   output. Refused connections are `creche.sink.refused` lines, outside any stream,
   with the peer and `creche.sink.refusal`. The chain proves integrity only as far
   as its checkpoints are kept out of reach, for example shipped to a second store.
+- **OpenTelemetry logs** (`--otlp URL`, with JSON output): the same lines,
+  also exported to a collector as OTLP over gRPC (`--otlp-protocol grpc`, the
+  default, port 4317) or OTLP/HTTP (`--otlp-protocol http`, port 4318), protobuf
+  compressed with zstd, in cleartext to a collector on the node. Each line is one
+  log record whose body is the line's exact text and whose `eventName` is the
+  line's `event.name`. The stream's sandbox, pod and stream id are the resource.
+  A collector can parse the body into attributes, and the bodies, each followed
+  by a newline, still pass `--verify`. The exporter never holds up stdout: when it
+  falls behind, lines are dropped from the export only, counted on stderr, and
+  show as gaps in `creche.seq` downstream.
 - **Raw** (`-o raw`): the validated wire records unchanged, for consumers that
   decode the creche format themselves (`creche-wire`). Each frame is a
   native-endian `u16` length and the sandbox id, then a native-endian `u32` length

@@ -9,6 +9,7 @@ pub mod audit;
 pub mod json;
 pub mod k8s;
 pub mod listen;
+pub mod otlp;
 pub mod peer;
 pub mod stream;
 pub mod tasks;
