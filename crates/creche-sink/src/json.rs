@@ -2,7 +2,7 @@
 
 use std::io::Write as _;
 
-use creche_wire::{Body, HelloFlags, Kind, Record};
+use creche_wire::{Body, HelloFlags, Kind, Labels, Record};
 
 use crate::k8s::{Pod, Unresolved};
 use crate::tasks::TaskInfo;
@@ -100,6 +100,53 @@ fn render_attributes(attributes: &[(&'static str, Box<str>)]) -> Box<[u8]> {
     json.into()
 }
 
+/// What the guest reported about a cgroup, rendered once as the attributes
+/// every line from a process in it carries: its path, which the guest kernel
+/// knows, and the labels its owner set, which the workload claims.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Cgroup {
+    /// Path from the cgroup v2 root.
+    pub path: Box<str>,
+    /// `,"creche.cgroup.path":...` and any labels, ready to copy into a line.
+    json: Box<[u8]>,
+}
+
+impl Cgroup {
+    /// A cgroup at `path`, labelled with `labels` on a cgroup `owner_uid` owns.
+    #[must_use]
+    pub fn new(path: &[u8], owner_uid: u32, labels: Labels<'_>) -> Self {
+        let path: Box<str> = String::from_utf8_lossy(path).into();
+        let mut json = Vec::new();
+        let mut line = Line { out: &mut json };
+        line.str(key!("creche.cgroup.path"), &path);
+        if !labels.is_empty() {
+            line.num(key!("creche.cgroup.label_owner.uid"), owner_uid);
+        }
+        for (name, value) in labels.iter() {
+            // Label keys are lowercase letters, digits, `_`, `-` and `.`, so
+            // the attribute name needs no escaping.
+            line.out.extend_from_slice(b",\"creche.guest.agent.");
+            line.out.extend_from_slice(name.as_bytes());
+            line.out.extend_from_slice(b"\":");
+            push_json_str(line.out, value);
+        }
+        Self {
+            path,
+            json: json.into(),
+        }
+    }
+
+    /// The path component naming the container the cgroup sits in, the
+    /// deepest one that names a container, or else its leaf.
+    #[must_use]
+    pub fn container_scope(&self) -> &str {
+        self.path
+            .rsplit('/')
+            .find(|part| crate::k8s::claimed_id(part).is_some())
+            .unwrap_or_else(|| self.path.rsplit('/').next().unwrap_or_default())
+    }
+}
+
 impl From<&str> for Origin {
     /// A sandbox id with no pod lookup.
     fn from(id: &str) -> Self {
@@ -176,6 +223,9 @@ pub fn render(
         line.str(key!("process.executable.name"), &t.comm);
         line.num(key!("creche.cgroup.id"), t.cgroup_id);
         line.str(key!("creche.cgroup.name"), &t.cgroup);
+        if let Some(c) = &t.cgroup_info {
+            line.out.extend_from_slice(&c.json);
+        }
         if let Some(c) = &t.container {
             line.str(key!("creche.guest.container.id"), &c.id);
             line.str(key!("creche.guest.container.name"), &c.name);
@@ -230,6 +280,16 @@ pub fn render(
             line.num(key!("creche.observer.bpf_run_ns"), hb.bpf_run_ns);
             line.num(key!("creche.observer.bpf_run_cnt"), hb.bpf_run_cnt);
         }
+        Body::Cgroup {
+            cgroup_id,
+            owner_uid,
+            path,
+            labels,
+        } => {
+            line.num(key!("creche.cgroup.id"), cgroup_id);
+            line.out
+                .extend_from_slice(&Cgroup::new(path, owner_uid, labels).json);
+        }
         Body::Unknown { body } => {
             line.num(key!("creche.record.kind"), h.kind);
             line.num(
@@ -251,6 +311,7 @@ fn event_name(code: u16) -> &'static str {
         Some(Kind::Task) => "creche.process.context",
         Some(Kind::Hello) => "creche.observer.hello",
         Some(Kind::Heartbeat) => "creche.observer.heartbeat",
+        Some(Kind::Cgroup) => "creche.cgroup.context",
         None => "creche.unknown",
     }
 }
@@ -434,6 +495,7 @@ mod tests {
             comm: "wget".into(),
             cgroup: "cri-containerd-x.scope".into(),
             container: None,
+            cgroup_info: None,
         }
     }
 

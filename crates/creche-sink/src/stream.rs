@@ -6,9 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use creche_wire::{Body, DecodeError, Records};
 
 use crate::audit::Chain;
-use crate::json::{self, Origin, Value};
+use crate::json::{self, Cgroup, Origin, Value};
 use crate::k8s::Containers;
-use crate::tasks::{TaskInfo, Tasks};
+use crate::tasks::{Cgroups, TaskInfo, Tasks};
 
 /// What the sink writes for each stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,6 +44,8 @@ struct JsonState {
     tasks: Tasks,
     /// Checks the containers the guest claims, when its pod is known.
     containers: Option<Containers>,
+    /// The cgroups the observer described, by id.
+    cgroups: Cgroups,
     /// The next line's `creche.seq`.
     seq: u64,
 }
@@ -240,11 +242,26 @@ fn render_all(
         match record.body {
             Body::Task { context, cgroup } => {
                 let mut info = TaskInfo::new(&context, cgroup);
+                info.cgroup_info = state.cgroups.get(context.cgroup_id);
                 if let Some(containers) = state.containers.as_mut() {
-                    info.container = containers.claim(&info.cgroup);
+                    // The path, when known, names the container a nested
+                    // cgroup sits in. The leaf name alone does not.
+                    let scope = info
+                        .cgroup_info
+                        .as_ref()
+                        .map_or(&*info.cgroup, |c| c.container_scope());
+                    info.container = containers.claim(scope);
                 }
                 state.tasks.set(pid, info);
             }
+            Body::Cgroup {
+                cgroup_id,
+                owner_uid,
+                path,
+                labels,
+            } => state
+                .cgroups
+                .set(cgroup_id, Cgroup::new(path, owner_uid, labels)),
             Body::Exec { context, .. } => {
                 state.tasks.exec(pid, &context);
                 let seq = next(&mut state.seq);
@@ -374,15 +391,50 @@ mod tests {
     }
 
     fn task(pid: u32, parent: u32, comm: &[u8; 16], cgroup: &[u8]) -> Vec<u8> {
+        task_in(pid, parent, comm, 9, cgroup)
+    }
+
+    fn task_in(pid: u32, parent: u32, comm: &[u8; 16], cgroup_id: u64, cgroup: &[u8]) -> Vec<u8> {
         let body = [
             &parent.to_ne_bytes()[..],
             &1000_u32.to_ne_bytes(),
-            &9_u64.to_ne_bytes(),
+            &cgroup_id.to_ne_bytes(),
             comm,
             cgroup,
         ]
         .concat();
         rec(Kind::Task, pid, &body)
+    }
+
+    /// Container bundles under a temporary directory, each with its sandbox,
+    /// all named `agent`.
+    fn bundles(containers: &[(&str, &str)]) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        for (id, sandbox) in containers {
+            let dir = tmp.path().join(id);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(
+                dir.join("config.json"),
+                format!(
+                    r#"{{"annotations":{{"io.kubernetes.cri.container-type":"container",
+                    "io.kubernetes.cri.sandbox-id":"{sandbox}",
+                    "io.kubernetes.cri.container-name":"agent"}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        tmp
+    }
+
+    fn fork(child: u32, parent: u32) -> Vec<u8> {
+        rec(
+            Kind::Fork,
+            child,
+            &[&parent.to_ne_bytes()[..], &[0; 4]].concat(),
+        )
     }
 
     fn lines(out: &[u8]) -> Vec<serde_json::Value> {
@@ -461,34 +513,12 @@ mod tests {
 
     #[test]
     fn processes_carry_the_container_the_host_confirms() {
-        use std::os::unix::fs::PermissionsExt as _;
         use std::sync::Arc;
 
         let ours = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
         let theirs = "b".repeat(64);
-        let tmp = tempfile::tempdir().unwrap();
-        for (id, sandbox) in [(ours, "sb"), (theirs.as_str(), "other")] {
-            let dir = tmp.path().join(id);
-            std::fs::create_dir(&dir).unwrap();
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-            std::fs::write(
-                dir.join("config.json"),
-                format!(
-                    r#"{{"annotations":{{"io.kubernetes.cri.container-type":"container",
-                    "io.kubernetes.cri.sandbox-id":"{sandbox}",
-                    "io.kubernetes.cri.container-name":"agent"}}}}"#
-                ),
-            )
-            .unwrap();
-        }
+        let tmp = bundles(&[(ours, "sb"), (&theirs, "other")]);
         let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-        let fork = |child: u32, parent: u32| {
-            rec(
-                Kind::Fork,
-                child,
-                &[&parent.to_ne_bytes()[..], &[0; 4]].concat(),
-            )
-        };
         let data = [
             task(
                 10,
@@ -546,6 +576,111 @@ mod tests {
             lines(&out)
                 .iter()
                 .all(|v| v.get("creche.guest.container.id").is_none())
+        );
+    }
+
+    /// A cgroup record, as the observer encodes it.
+    fn cgroup(id: u64, owner: u32, path: &str, labels: &[(&str, &str)]) -> Vec<u8> {
+        let labels: Vec<(&[u8], &[u8])> = labels
+            .iter()
+            .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
+            .collect();
+        let mut out = vec![0; creche_wire::MAX_RECORD_LEN];
+        let len = creche_wire::encode_cgroup(1, 1, id, owner, path.as_bytes(), &labels, &mut out)
+            .unwrap();
+        out.truncate(len);
+        out
+    }
+
+    #[test]
+    fn nested_agent_cgroups_carry_their_labels_and_container() {
+        use std::sync::Arc;
+
+        let ours = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
+        let theirs = "b".repeat(64);
+        let tmp = bundles(&[(ours, "sb"), (&theirs, "other")]);
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let data = [
+            // An agent's own cgroup in our container, labelled by its owner.
+            cgroup(
+                21,
+                1001,
+                &format!("/kubepods/pod1/cri-containerd-{ours}.scope/planner"),
+                &[("name", "planner"), ("id", "a-1")],
+            ),
+            task_in(10, 1, &sh, 21, b"planner\0"),
+            fork(11, 10),
+            // One in another sandbox's container: labelled, but no container.
+            cgroup(
+                22,
+                1002,
+                &format!("/kubepods/pod2/cri-containerd-{theirs}.scope/tools"),
+                &[("name", "intruder")],
+            ),
+            task_in(20, 1, &sh, 22, b"tools\0"),
+            fork(21, 20),
+            // A cgroup the observer did not describe: its leaf name only.
+            task_in(30, 1, &sh, 23, b"planner\0"),
+            fork(31, 30),
+        ]
+        .concat();
+        let containers = Containers::new(Arc::from(tmp.path()), Arc::from("sb"));
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .with_containers(containers)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let l = lines(&out);
+        // Cgroup records, like task records, are context and not lines.
+        assert_eq!(l.len(), 3);
+        let field = |v: &serde_json::Value, k: &str| v.get(k).cloned();
+        let v = &l[0];
+        assert_eq!(v["process.pid"], 11);
+        assert_eq!(
+            v["creche.cgroup.path"],
+            format!("/kubepods/pod1/cri-containerd-{ours}.scope/planner")
+        );
+        assert_eq!(v["creche.cgroup.name"], "planner");
+        assert_eq!(v["creche.cgroup.label_owner.uid"], 1001);
+        assert_eq!(v["creche.guest.agent.name"], "planner");
+        assert_eq!(v["creche.guest.agent.id"], "a-1");
+        assert_eq!(v["creche.guest.container.id"], ours);
+        let v = &l[1];
+        assert_eq!(v["creche.guest.agent.name"], "intruder");
+        assert_eq!(field(v, "creche.guest.container.id"), None);
+        let v = &l[2];
+        assert_eq!(v["creche.cgroup.name"], "planner");
+        for k in [
+            "creche.cgroup.path",
+            "creche.cgroup.label_owner.uid",
+            "creche.guest.agent.name",
+            "creche.guest.container.id",
+        ] {
+            assert_eq!(field(v, k), None, "{k}");
+        }
+    }
+
+    #[test]
+    fn a_cgroup_without_labels_has_a_path_and_no_owner() {
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let data = [
+            cgroup(5, 0, "/kata-agent.service", &[]),
+            task_in(10, 1, &sh, 5, b"kata-agent.service\0"),
+            fork(11, 10),
+        ]
+        .concat();
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let l = lines(&out);
+        assert_eq!(l[0]["creche.cgroup.path"], "/kata-agent.service");
+        assert!(l[0].get("creche.cgroup.label_owner.uid").is_none());
+        assert!(
+            l[0].as_object()
+                .unwrap()
+                .keys()
+                .all(|k| !k.starts_with("creche.guest.agent."))
         );
     }
 
