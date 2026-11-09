@@ -50,6 +50,10 @@ run = "cargo bench --workspace --all-features --benches"
 description = "Mutation testing, must report 0 missed"
 run = "cargo mutants --workspace --config mutants.toml"
 
+[tasks.bump]
+description = "Calculate the next versions from conventional commits, then tag and push"
+run = "cog bump --auto"
+
 [tasks."lint:gha"]
 # actionlint catches workflow syntax and expression errors; zizmor runs the
 # security static analysis. zizmor runs offline without a token (local) and does
