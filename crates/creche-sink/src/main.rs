@@ -10,10 +10,12 @@ use anyhow::{Context as _, Result, bail};
 use creche_sink::audit;
 use creche_sink::k8s::CONTAINERD_BUNDLES;
 use creche_sink::listen::{self, Options};
+use creche_sink::otlp::{Endpoint, Protocol};
 use creche_sink::stream::{Format, StreamDecoder};
 
 const USAGE: &str = "\
 usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
+                   [--otlp URL [--otlp-protocol grpc|http]]
        creche-sink -f FILE|- [-o json|raw]
        creche-sink --verify FILE|-
   -d, --dir DIR      directory of Kata sandboxes (default /run/vc/vm)
@@ -24,6 +26,9 @@ usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
   -f, --file FILE    decode a captured stream (- for stdin) and exit
   -o, --output FMT   json: one JSON line per event, OpenTelemetry attribute names (default)
                      raw: the records unchanged, in frames naming their sandbox
+      --otlp URL     also export the JSON lines as OpenTelemetry logs to a collector,
+                     http://host[:port], zstd compressed (JSON output only)
+      --otlp-protocol grpc (default, port 4317) or http (port 4318, path /v1/logs)
       --verify FILE  check the audit chains in saved JSON output (- for stdin) and exit,
                      with status 1 when a stream does not add up";
 
@@ -42,6 +47,8 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
     let mut bundles = Some(PathBuf::from(CONTAINERD_BUNDLES));
     let mut file = None;
     let mut verify = None;
+    let mut otlp = None;
+    let mut protocol = Protocol::Grpc;
     let mut format = Format::Json;
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
@@ -52,6 +59,14 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
             Long("no-pods") => bundles = None,
             Short('f') | Long("file") => file = Some(PathBuf::from(parser.value()?)),
             Long("verify") => verify = Some(PathBuf::from(parser.value()?)),
+            Long("otlp") => otlp = Some(parser.value()?.string()?),
+            Long("otlp-protocol") => {
+                protocol = match parser.value()?.to_str() {
+                    Some("grpc") => Protocol::Grpc,
+                    Some("http") => Protocol::Http,
+                    _ => return Err("--otlp-protocol takes grpc or http".into()),
+                }
+            }
             Short('o') | Long("output") => {
                 format = match parser.value()?.to_str() {
                     Some("json") => Format::Json,
@@ -63,6 +78,13 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
             _ => return Err(arg.unexpected()),
         }
     }
+    let otlp = match otlp {
+        Some(_) if format != Format::Json => {
+            return Err("--otlp exports JSON lines, it does not take -o raw".into());
+        }
+        Some(url) => Some(Endpoint::parse(&url, protocol)?),
+        None => None,
+    };
     Ok(Some(match (verify, file) {
         (Some(file), _) => Mode::Verify { file },
         (None, Some(file)) => Mode::Decode { file, format },
@@ -72,6 +94,7 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
                 port,
                 format,
                 bundles,
+                otlp,
             },
         },
     }))
