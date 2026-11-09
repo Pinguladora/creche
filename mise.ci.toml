@@ -6,3 +6,20 @@ git config --global core.compression 0
 git config --global core.fsync -all
 """
 description = "Optimize Git config for CI (disable compression, fsync)"
+
+[tasks."ci:fmt"]
+description = "Fail when any Rust file is not formatted"
+run = "cargo fmt --all --check"
+
+[tasks."ci:clippy"]
+description = "Clippy on every target and feature, warnings as errors"
+run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+
+[tasks."ci:deny"]
+description = "Licenses, advisories, bans and sources (cargo-deny)"
+run = "cargo deny --locked check"
+
+[tasks."ci:check"]
+description = "Full CI gate: format, clippy, cargo-deny, then the tests (which build the BPF object)"
+depends = ["ci:fmt", "ci:clippy", "ci:deny"]
+run = "mise run test"

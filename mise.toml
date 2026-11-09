@@ -49,3 +49,14 @@ run = "cargo bench --workspace --all-features --benches"
 [tasks.mutants]
 description = "Mutation testing, must report 0 missed"
 run = "cargo mutants --workspace --config mutants.toml"
+
+[tasks."lint:gha"]
+# actionlint catches workflow syntax and expression errors; zizmor runs the
+# security static analysis. zizmor runs offline without a token (local) and does
+# the online audits when GITHUB_TOKEN is set (the lint-gha CI job passes it).
+run = [
+  "actionlint -color -shellcheck=",
+  "zizmor --config .github/zizmor.yml .github/workflows",
+]
+description = "Lint and security-audit the GitHub Actions workflows (actionlint + zizmor)"
+sources = [".github/workflows/**", ".github/zizmor.yml"]
