@@ -121,7 +121,11 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<()> {
-    let mut probes = Probes::load(args.dedup, args.stage)?;
+    let port = match args.target {
+        Target::Vsock(port) => Some(port),
+        Target::Stdout => None,
+    };
+    let mut probes = Probes::load(args.dedup, args.stage, port)?;
     // Kernel-side run-time accounting stays on while this fd is open.
     let _stats = args
         .stats
@@ -137,10 +141,16 @@ fn run(args: &Args) -> Result<()> {
     if probes.process_only {
         flags = flags.with(HelloFlags::PROCESS_ONLY);
     }
-    let hello = HelloRecord {
+    // Built on each new connection, after the guard has had the chance to see
+    // the observer's own connect.
+    let hello = |guarded: bool| HelloRecord {
         header: Header::for_observer(Kind::Hello, HELLO_LEN, pid, metrics::boottime_ns()),
         version: VERSION,
-        flags,
+        flags: if guarded {
+            flags.with(HelloFlags::GUARDED)
+        } else {
+            flags
+        },
     };
 
     let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?;
@@ -155,12 +165,20 @@ fn run(args: &Args) -> Result<()> {
     let mut next_beat = Instant::now();
     let mut last_drain = Instant::now();
     let mut dropped = 0;
+    let mut drained = false;
     loop {
         // Idle: sleep until the next heartbeat. Woken (the BPF side only wakes
         // us for the first record after a drain): drain right away if the last
         // drain was a batch window ago, so sparse events arrive without delay.
         // Otherwise wait out the window, so a burst is drained in one go.
-        let wait = next_beat.saturating_duration_since(Instant::now());
+        //
+        // A program decides on the wakeup before it writes its record. If we
+        // drained in between, that record would wait for the heartbeat, so
+        // after a drain that found records, sleep at most one more window.
+        let mut wait = next_beat.saturating_duration_since(Instant::now());
+        if drained {
+            wait = wait.min(args.batch_window);
+        }
         let timeout = EpollTimeout::try_from(wait).unwrap_or(EpollTimeout::NONE);
         let mut ready = [EpollEvent::empty()];
         match epoll.wait(&mut ready, timeout) {
@@ -171,7 +189,9 @@ fn run(args: &Args) -> Result<()> {
             Err(e) => return Err(e).context("waiting for events"),
         }
         last_drain = Instant::now();
+        drained = false;
         while let Some(record) = probes.events.next() {
+            drained = true;
             if !args.discard {
                 queue.push(&record);
             }
@@ -196,7 +216,7 @@ fn run(args: &Args) -> Result<()> {
             };
             queue.push(heartbeat.as_bytes());
         }
-        let reconnected = output.send(&mut queue, hello.as_bytes());
+        let reconnected = output.send(&mut queue, || hello(probes.guarded()).as_bytes().to_vec());
         // Records may have been lost, task records among them.
         if reconnected || queue.dropped_bytes() != dropped {
             dropped = queue.dropped_bytes();

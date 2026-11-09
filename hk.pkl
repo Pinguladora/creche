@@ -42,12 +42,22 @@ local pre_commit = new Mapping<String, Step> {
 
 // Slower checks, run before push (matches the original prek stages).
 local pre_push = new Mapping<String, Step> {
-    // GitHub Actions hardening: pin actions to a SHA, lint the workflows, and run
-    // zizmor's security static analysis. zizmor is pinned to offline mode here
-    // (ZIZMOR_OFFLINE) so the pre-push hook stays fast and needs no token. The
-    // lint-gha workflow runs the online audits in CI.
+    // GitHub Actions hardening: pin actions to a SHA, lint the workflows with
+    // jactionlint (actionlint's checks plus security and policy rules, configured
+    // in .github/jactionlint.yaml), and run zizmor's security static analysis
+    // alongside it while jactionlint proves itself. zizmor is pinned to offline
+    // mode here (ZIZMOR_OFFLINE) so the pre-push hook stays fast and needs no
+    // token. The lint-gha workflow runs the online audits in CI.
     ["pinact"] = Builtins.pinact
-    ["actionlint"] = Builtins.actionlint
+    // hk has no jactionlint builtin. This is the step its docs give, run on the
+    // whole repository (no {{files}}), so a change to the config is checked too.
+    ["jactionlint"] {
+        glob = List(".github/workflows/*.yaml", ".github/workflows/*.yml", ".github/jactionlint.yaml")
+        batch = true
+        diagnostic_format = "sarif"
+        check = "jactionlint --shellcheck= --format sarif"
+        check_diff = "hk util sarif-diff -- jactionlint --shellcheck= --format sarif"
+    }
     ["zizmor"] = (Builtins.zizmor) { env { ["ZIZMOR_OFFLINE"] = "true" } }
     // Rust: lint every target (tests included) as errors, and check dependency
     // licenses, advisories, bans and sources (deny.toml).
