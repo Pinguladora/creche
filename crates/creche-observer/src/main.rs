@@ -165,12 +165,20 @@ fn run(args: &Args) -> Result<()> {
     let mut next_beat = Instant::now();
     let mut last_drain = Instant::now();
     let mut dropped = 0;
+    let mut drained = false;
     loop {
         // Idle: sleep until the next heartbeat. Woken (the BPF side only wakes
         // us for the first record after a drain): drain right away if the last
         // drain was a batch window ago, so sparse events arrive without delay.
         // Otherwise wait out the window, so a burst is drained in one go.
-        let wait = next_beat.saturating_duration_since(Instant::now());
+        //
+        // A program decides on the wakeup before it writes its record. If we
+        // drained in between, that record would wait for the heartbeat, so
+        // after a drain that found records, sleep at most one more window.
+        let mut wait = next_beat.saturating_duration_since(Instant::now());
+        if drained {
+            wait = wait.min(args.batch_window);
+        }
         let timeout = EpollTimeout::try_from(wait).unwrap_or(EpollTimeout::NONE);
         let mut ready = [EpollEvent::empty()];
         match epoll.wait(&mut ready, timeout) {
@@ -181,7 +189,9 @@ fn run(args: &Args) -> Result<()> {
             Err(e) => return Err(e).context("waiting for events"),
         }
         last_drain = Instant::now();
+        drained = false;
         while let Some(record) = probes.events.next() {
+            drained = true;
             if !args.discard {
                 queue.push(&record);
             }
