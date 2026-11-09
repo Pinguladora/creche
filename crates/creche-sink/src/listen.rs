@@ -21,7 +21,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::json::{Attribution, Origin};
-use crate::k8s::{self, Unresolved};
+use crate::k8s::{self, Containers, Unresolved};
 use crate::peer::{self, Refusal};
 use crate::stream::{Format, StreamDecoder};
 
@@ -202,7 +202,10 @@ async fn admit(
         Err(e) => Err(Refusal::from(e)),
     };
     match verdict {
-        Ok(()) => receive(stream, origin(&sandbox).await, format, tx).await,
+        Ok(()) => {
+            let (origin, containers) = origin(&sandbox).await;
+            receive(stream, origin, containers, format, tx).await;
+        }
         Err(refusal) => eprintln!(
             "creche-sink: refusing a connection to {}: {refusal}",
             short(&sandbox.id)
@@ -212,33 +215,43 @@ async fn admit(
 
 /// What the host attests about `sandbox`: its id and, when a bundle directory is
 /// set, the pod the container runtime recorded for it. Looked up once per
-/// connection, so a stream's pod cannot change while it runs.
-async fn origin(sandbox: &Sandbox) -> Origin {
+/// connection, so a stream's pod cannot change while it runs. When the pod is
+/// known, also the checker for the containers the guest claims.
+async fn origin(sandbox: &Sandbox) -> (Origin, Option<Containers>) {
     let Some(bundles) = sandbox.bundles.clone() else {
-        return Origin::from(&*sandbox.id);
+        return (Origin::from(&*sandbox.id), None);
     };
-    let id = Arc::clone(&sandbox.id);
-    let attribution = tokio::task::spawn_blocking(move || k8s::resolve(&bundles, &id))
+    let (dir, id) = (Arc::clone(&bundles), Arc::clone(&sandbox.id));
+    let attribution = tokio::task::spawn_blocking(move || k8s::resolve(&dir, &id))
         .await
         .unwrap_or(Err(Unresolved::Unreadable))
         .map_or_else(Attribution::Unresolved, Attribution::Pod);
-    if let Attribution::Unresolved(why) = &attribution {
-        eprintln!(
-            "creche-sink: no pod for sandbox {}: {why}",
-            short(&sandbox.id)
-        );
-    }
-    Origin::new(&sandbox.id, &attribution)
+    let containers = match &attribution {
+        Attribution::Pod(_) => Some(Containers::new(bundles, Arc::clone(&sandbox.id))),
+        Attribution::Unresolved(why) => {
+            eprintln!(
+                "creche-sink: no pod for sandbox {}: {why}",
+                short(&sandbox.id)
+            );
+            None
+        }
+        Attribution::None => None,
+    };
+    (Origin::new(&sandbox.id, &attribution), containers)
 }
 
 /// Decodes one connection until it closes or turns out to be corrupt.
 async fn receive(
     mut stream: UnixStream,
     origin: Origin,
+    containers: Option<Containers>,
     format: Format,
     tx: mpsc::Sender<Vec<u8>>,
 ) {
     let mut decoder = StreamDecoder::new(format);
+    if let Some(containers) = containers {
+        decoder = decoder.with_containers(containers);
+    }
     let mut chunk = vec![0; READ_CHUNK];
     loop {
         let n = match stream.read(&mut chunk).await {
@@ -456,7 +469,7 @@ mod tests {
         runtime().block_on(async {
             let (tx, mut rx) = mpsc::channel(8);
             let (mut guest, host) = UnixStream::pair().unwrap();
-            let task = tokio::spawn(receive(host, Origin::from("sb"), Format::Json, tx));
+            let task = tokio::spawn(receive(host, Origin::from("sb"), None, Format::Json, tx));
             let mut bad = heartbeat();
             bad.header.len = 3;
             guest.write_all(bad.as_bytes()).await.unwrap();

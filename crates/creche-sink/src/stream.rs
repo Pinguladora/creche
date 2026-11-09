@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use creche_wire::{Body, DecodeError, Records};
 
 use crate::json::{self, Origin};
+use crate::k8s::Containers;
 use crate::tasks::{TaskInfo, Tasks};
 
 /// What the sink writes for each stream.
@@ -31,6 +32,8 @@ pub struct StreamDecoder {
     pending: Vec<u8>,
     /// Context of the stream's processes, from its task records (JSON only).
     tasks: Tasks,
+    /// Checks the containers the guest claims, when its pod is known.
+    containers: Option<Containers>,
 }
 
 impl StreamDecoder {
@@ -41,6 +44,14 @@ impl StreamDecoder {
             format,
             ..Self::default()
         }
+    }
+
+    /// Also reports the pod's container each process runs in, as the guest
+    /// claims it and `containers` confirms it.
+    #[must_use]
+    pub fn with_containers(mut self, containers: Containers) -> Self {
+        self.containers = Some(containers);
+        self
     }
 
     /// Decodes the complete records available after appending `data` and writes
@@ -74,7 +85,15 @@ impl StreamDecoder {
     ) -> Result<(), DecodeError> {
         let format = self.format;
         if self.pending.is_empty() {
-            let used = write_all(format, data, origin, observed_ns, &mut self.tasks, out)?;
+            let used = write_all(
+                format,
+                data,
+                origin,
+                observed_ns,
+                &mut self.tasks,
+                &mut self.containers,
+                out,
+            )?;
             self.pending
                 .extend_from_slice(data.get(used..).unwrap_or_default());
         } else {
@@ -85,6 +104,7 @@ impl StreamDecoder {
                 origin,
                 observed_ns,
                 &mut self.tasks,
+                &mut self.containers,
                 out,
             )?;
             self.pending.drain(..used);
@@ -113,10 +133,11 @@ fn write_all(
     origin: &Origin,
     observed_ns: u64,
     tasks: &mut Tasks,
+    containers: &mut Option<Containers>,
     out: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
     match format {
-        Format::Json => render_all(buf, origin, observed_ns, tasks, out),
+        Format::Json => render_all(buf, origin, observed_ns, tasks, containers, out),
         Format::Raw => frame_all(buf, origin.id(), out),
     }
 }
@@ -128,6 +149,7 @@ fn render_all(
     origin: &Origin,
     observed_ns: u64,
     tasks: &mut Tasks,
+    containers: &mut Option<Containers>,
     out: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
     let mut records = Records::new(buf);
@@ -135,7 +157,13 @@ fn render_all(
         let record = record?;
         let pid = record.header.pid;
         match record.body {
-            Body::Task { context, cgroup } => tasks.set(pid, TaskInfo::new(&context, cgroup)),
+            Body::Task { context, cgroup } => {
+                let mut info = TaskInfo::new(&context, cgroup);
+                if let Some(containers) = containers.as_mut() {
+                    info.container = containers.claim(&info.cgroup);
+                }
+                tasks.set(pid, info);
+            }
             Body::Exec { context, .. } => {
                 tasks.exec(pid, &context);
                 json::render(origin, &record, tasks.get(pid), observed_ns, out);
@@ -342,6 +370,96 @@ mod tests {
         assert_eq!(l[0]["process.real_user.id"], 1000);
         // The child kept the cgroup name it inherited.
         assert_eq!(l[2]["creche.cgroup.name"], "pod-a");
+    }
+
+    #[test]
+    fn processes_carry_the_container_the_host_confirms() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::Arc;
+
+        let ours = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
+        let theirs = "b".repeat(64);
+        let tmp = tempfile::tempdir().unwrap();
+        for (id, sandbox) in [(ours, "sb"), (theirs.as_str(), "other")] {
+            let dir = tmp.path().join(id);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(
+                dir.join("config.json"),
+                format!(
+                    r#"{{"annotations":{{"io.kubernetes.cri.container-type":"container",
+                    "io.kubernetes.cri.sandbox-id":"{sandbox}",
+                    "io.kubernetes.cri.container-name":"agent"}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let fork = |child: u32, parent: u32| {
+            rec(
+                Kind::Fork,
+                child,
+                &[&parent.to_ne_bytes()[..], &[0; 4]].concat(),
+            )
+        };
+        let data = [
+            task(
+                10,
+                1,
+                &sh,
+                format!("cri-containerd-{ours}.scope\0").as_bytes(),
+            ),
+            fork(11, 10),
+            rec(Kind::Exit, 11, &[0; 8]),
+            // Another pod's container, and a guest service.
+            task(
+                20,
+                1,
+                &sh,
+                format!("cri-containerd-{theirs}.scope\0").as_bytes(),
+            ),
+            fork(21, 20),
+            task(30, 1, &sh, b"kata-agent.service\0"),
+            fork(31, 30),
+        ]
+        .concat();
+        let containers = Containers::new(Arc::from(tmp.path()), Arc::from("sb"));
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .with_containers(containers)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let claimed: Vec<_> = lines(&out)
+            .iter()
+            .map(|v| {
+                (
+                    v["process.pid"].as_u64().unwrap(),
+                    v["creche.guest.container.id"].as_str().map(str::to_owned),
+                    v["creche.guest.container.name"].as_str().map(str::to_owned),
+                )
+            })
+            .collect();
+        let agent = (Some(ours.to_owned()), Some("agent".to_owned()));
+        assert_eq!(
+            claimed,
+            [
+                (11, agent.0.clone(), agent.1.clone()),
+                (11, agent.0, agent.1),
+                (21, None, None),
+                (31, None, None),
+            ]
+        );
+
+        // Without a checker, nothing is claimed.
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        assert!(
+            lines(&out)
+                .iter()
+                .all(|v| v.get("creche.guest.container.id").is_none())
+        );
     }
 
     #[test]

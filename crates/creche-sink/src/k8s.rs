@@ -8,7 +8,7 @@
 //! here comes from the guest: the sandbox id is the one the peer check attested,
 //! and the spec is read once, when a connection is accepted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io::Read as _;
@@ -32,6 +32,12 @@ const SANDBOX_ID: &str = "io.kubernetes.cri.sandbox-id";
 const SANDBOX_NAME: &str = "io.kubernetes.cri.sandbox-name";
 const SANDBOX_NAMESPACE: &str = "io.kubernetes.cri.sandbox-namespace";
 const SANDBOX_UID: &str = "io.kubernetes.cri.sandbox-uid";
+const CONTAINER_NAME: &str = "io.kubernetes.cri.container-name";
+
+/// Distinct container claims looked up per stream. A guest names a few
+/// containers. Past this, new claims are not looked up, so a hostile guest
+/// cannot make the sink read the disk without bound.
+const MAX_CLAIMS: usize = 256;
 
 /// A pod, as the container runtime recorded it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +101,12 @@ struct Spec {
 ///
 /// Why the pod is not known.
 pub fn resolve(bundles: &Path, id: &str) -> Result<Pod, Unresolved> {
+    pod(&annotations(bundles, id)?, id)
+}
+
+/// The annotations of the spec in bundle `id` under `bundles`, when the bundle
+/// and its spec can only have been written by a trusted user. Blocking.
+fn annotations(bundles: &Path, id: &str) -> Result<BTreeMap<String, String>, Unresolved> {
     let trusted = trusted_owners();
     let bundle = bundles.join(id);
     let dir = fs::symlink_metadata(&bundle).map_err(|_| Unresolved::NoBundle)?;
@@ -116,28 +128,108 @@ pub fn resolve(bundles: &Path, id: &str) -> Result<Pod, Unresolved> {
     if u64::try_from(text.len()).map_or(true, |len| len > MAX_SPEC_LEN) {
         return Err(Unresolved::Unreadable);
     }
-    pod(&text, id)
+    parse(&text)
 }
 
-/// The pod in spec `text`, which must be sandbox `id`'s.
-fn pod(text: &str, id: &str) -> Result<Pod, Unresolved> {
+/// The annotations of the OCI spec `text`.
+fn parse(text: &str) -> Result<BTreeMap<String, String>, Unresolved> {
     let spec: Spec = json::from_str(text).map_err(|_| Unresolved::Malformed)?;
-    let annotations = spec.annotations.unwrap_or_default();
+    Ok(spec.annotations.unwrap_or_default())
+}
+
+/// The annotation `key`, when present, non-empty and at most [`MAX_VALUE_LEN`].
+fn value(annotations: &BTreeMap<String, String>, key: &str) -> Result<Arc<str>, Unresolved> {
+    annotations
+        .get(key)
+        .filter(|v| !v.is_empty() && v.len() <= MAX_VALUE_LEN)
+        .map(|v| Arc::from(v.as_str()))
+        .ok_or(Unresolved::Annotation)
+}
+
+/// Whether `annotations` are those of a `kind` (`sandbox` or `container`) in
+/// sandbox `sandbox`.
+fn belongs(annotations: &BTreeMap<String, String>, kind: &str, sandbox: &str) -> bool {
     let get = |key: &str| annotations.get(key).map(String::as_str);
-    if get(CONTAINER_TYPE) != Some("sandbox") || get(SANDBOX_ID) != Some(id) {
+    get(CONTAINER_TYPE) == Some(kind) && get(SANDBOX_ID) == Some(sandbox)
+}
+
+/// The pod in sandbox `id`'s annotations.
+fn pod(annotations: &BTreeMap<String, String>, id: &str) -> Result<Pod, Unresolved> {
+    if !belongs(annotations, "sandbox", id) {
         return Err(Unresolved::Mismatch);
     }
-    let value = |key: &str| {
-        get(key)
-            .filter(|v| !v.is_empty() && v.len() <= MAX_VALUE_LEN)
-            .map(Arc::from)
-            .ok_or(Unresolved::Annotation)
-    };
     Ok(Pod {
-        name: value(SANDBOX_NAME)?,
-        namespace: value(SANDBOX_NAMESPACE)?,
-        uid: value(SANDBOX_UID)?,
+        name: value(annotations, SANDBOX_NAME)?,
+        namespace: value(annotations, SANDBOX_NAMESPACE)?,
+        uid: value(annotations, SANDBOX_UID)?,
     })
+}
+
+/// A container of the pod, which the guest claims a process runs in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Container {
+    /// `creche.guest.container.id`.
+    pub id: Arc<str>,
+    /// `creche.guest.container.name`, the name in the pod spec.
+    pub name: Arc<str>,
+}
+
+/// The container id a guest cgroup name claims: kata-agent names a container's
+/// cgroup `cri-containerd-<id>.scope` with the systemd driver and `<id>` with
+/// cgroupfs. Container ids are 64 lowercase hex digits.
+#[must_use]
+pub fn claimed_id(cgroup: &str) -> Option<&str> {
+    let id = cgroup
+        .strip_prefix("cri-containerd-")
+        .and_then(|rest| rest.strip_suffix(".scope"))
+        .unwrap_or(cgroup);
+    (id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).then_some(id)
+}
+
+/// The containers one stream's guest claims, checked against the runtime's
+/// bundles. A claim holds only when the claimed id is a container of this
+/// stream's sandbox. Each distinct cgroup name is looked up once.
+#[derive(Debug)]
+pub struct Containers {
+    bundles: Arc<Path>,
+    sandbox: Arc<str>,
+    claims: HashMap<Arc<str>, Option<Arc<Container>>>,
+}
+
+impl Containers {
+    /// Claims from sandbox `sandbox`, checked against `bundles`.
+    #[must_use]
+    pub fn new(bundles: Arc<Path>, sandbox: Arc<str>) -> Self {
+        Self {
+            bundles,
+            sandbox,
+            claims: HashMap::new(),
+        }
+    }
+
+    /// The container a process in guest cgroup `cgroup` runs in, if the claim
+    /// holds. Blocking on the first claim of each cgroup name.
+    pub fn claim(&mut self, cgroup: &Arc<str>) -> Option<Arc<Container>> {
+        if let Some(known) = self.claims.get(cgroup) {
+            return known.clone();
+        }
+        let id = claimed_id(cgroup)?;
+        if self.claims.len() >= MAX_CLAIMS {
+            return None;
+        }
+        let found = annotations(&self.bundles, id)
+            .ok()
+            .filter(|a| belongs(a, "container", &self.sandbox))
+            .and_then(|a| value(&a, CONTAINER_NAME).ok())
+            .map(|name| {
+                Arc::new(Container {
+                    id: Arc::from(id),
+                    name,
+                })
+            });
+        self.claims.insert(Arc::clone(cgroup), found.clone());
+        found
+    }
 }
 
 /// Users whose files are trusted: root and the user this process runs as, read
@@ -217,9 +309,12 @@ mod tests {
         let mut untyped = sandbox_spec();
         untyped.remove(0);
         for annotations in [other, container, untyped] {
-            assert_eq!(pod(&spec(&annotations), ID), Err(Unresolved::Mismatch));
+            assert_eq!(
+                pod(&parse(&spec(&annotations)).unwrap(), ID),
+                Err(Unresolved::Mismatch)
+            );
         }
-        assert_eq!(pod("{}", ID), Err(Unresolved::Mismatch));
+        assert_eq!(pod(&parse("{}").unwrap(), ID), Err(Unresolved::Mismatch));
     }
 
     #[test]
@@ -232,7 +327,7 @@ mod tests {
                 .filter(|(k, _)| *k != key)
                 .collect();
             assert_eq!(
-                pod(&spec(&without), ID),
+                pod(&parse(&spec(&without)).unwrap(), ID),
                 Err(Unresolved::Annotation),
                 "{key}"
             );
@@ -246,7 +341,7 @@ mod tests {
                     .map(|(k, v)| if k == key { (k, value) } else { (k, v) })
                     .collect();
                 assert_eq!(
-                    pod(&spec(&set), ID).is_ok(),
+                    pod(&parse(&spec(&set)).unwrap(), ID).is_ok(),
                     expected,
                     "{key} of {} bytes",
                     value.len()
@@ -263,7 +358,7 @@ mod tests {
             "{\"annotations\":[1]}",
             "{\"annotations\":{\"a\":1}}",
         ] {
-            assert_eq!(pod(text, ID), Err(Unresolved::Malformed), "{text}");
+            assert_eq!(parse(text), Err(Unresolved::Malformed), "{text}");
         }
     }
 
@@ -274,7 +369,7 @@ mod tests {
             "[".repeat(100_000),
             "]".repeat(100_000)
         );
-        assert_eq!(pod(&deep, ID), Err(Unresolved::Mismatch));
+        assert_eq!(parse(&deep).map(|a| a.len()), Ok(0));
     }
 
     #[test]
@@ -320,6 +415,93 @@ mod tests {
         assert_eq!(trusted_owners(), [0, mine.uid()]);
         assert!(private(&mine, &[mine.uid()]));
         assert!(!private(&mine, &[mine.uid().wrapping_add(1)]));
+    }
+
+    const CID: &str = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
+
+    #[test]
+    fn cgroup_names_claim_container_ids() {
+        let scope = format!("cri-containerd-{CID}.scope");
+        assert_eq!(claimed_id(&scope), Some(CID));
+        assert_eq!(claimed_id(CID), Some(CID));
+        for name in [
+            "kata-agent.service",
+            "cri-containerd-abc.scope",
+            &format!("cri-containerd-{CID}"),
+            &format!("{CID}.scope"),
+            &CID.to_uppercase(),
+            &CID[1..],
+            &format!("{CID}0"),
+            "",
+        ] {
+            assert_eq!(claimed_id(name), None, "{name}");
+        }
+    }
+
+    /// Bundles for sandbox `ID` and the containers in `containers`, each as
+    /// (container id, sandbox id, container type).
+    fn bundles(containers: &[(&str, &str, &str)]) -> tempfile::TempDir {
+        let tmp = bundle(&spec(&sandbox_spec()));
+        for (id, sandbox, kind) in containers {
+            let dir = tmp.path().join(id);
+            fs::create_dir(&dir).unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let text = spec(&[
+                (CONTAINER_TYPE, kind),
+                (SANDBOX_ID, sandbox),
+                (CONTAINER_NAME, "agent"),
+            ]);
+            fs::write(dir.join("config.json"), text).unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn a_claim_holds_only_for_a_container_of_this_sandbox() {
+        let other = "a".repeat(64);
+        let foreign = "b".repeat(64);
+        let sandboxed = "c".repeat(64);
+        let tmp = bundles(&[
+            (CID, ID, "container"),
+            (&foreign, "fedcba9876543210", "container"),
+            (&sandboxed, ID, "sandbox"),
+        ]);
+        let mut containers = Containers::new(Arc::from(tmp.path()), Arc::from(ID));
+        let claim = |c: &mut Containers, name: &str| c.claim(&Arc::from(name));
+        assert_eq!(
+            claim(&mut containers, &format!("cri-containerd-{CID}.scope")).as_deref(),
+            Some(&Container {
+                id: CID.into(),
+                name: "agent".into()
+            })
+        );
+        // Another pod's container, a sandbox, an unknown id, guest services.
+        for name in [&foreign, &sandboxed, &other, "kata-agent.service"] {
+            assert_eq!(claim(&mut containers, name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn claims_are_looked_up_once_and_bounded() {
+        let tmp = bundles(&[(CID, ID, "container")]);
+        let mut containers = Containers::new(Arc::from(tmp.path()), Arc::from(ID));
+        let name: Arc<str> = Arc::from(CID);
+        assert!(containers.claim(&name).is_some());
+        // Cached: the bundle is gone, the answer stays.
+        fs::remove_dir_all(tmp.path().join(CID)).unwrap();
+        assert!(containers.claim(&name).is_some());
+
+        let tmp = bundles(&[(CID, ID, "container")]);
+        let mut containers = Containers::new(Arc::from(tmp.path()), Arc::from(ID));
+        for i in 0..MAX_CLAIMS {
+            assert_eq!(containers.claim(&Arc::from(format!("{i:064x}"))), None);
+        }
+        assert_eq!(containers.claims.len(), MAX_CLAIMS);
+        // Full: even a real container is no longer looked up.
+        assert_eq!(containers.claim(&name), None);
+        assert_eq!(containers.claims.len(), MAX_CLAIMS);
+        // Names that claim nothing are not counted.
+        assert_eq!(containers.claim(&Arc::from("kata-agent.service")), None);
     }
 
     #[test]
