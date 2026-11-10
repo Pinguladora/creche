@@ -13,7 +13,7 @@ postinstall = "hk install --mise"
 
 [tools]
 # hk and the pkl CLI it evaluates hk.pkl with. Keep hk in step with hk.pkl's import.
-"aqua:jdx/hk" = "2.11.0"
+"aqua:jdx/hk" = "2.11.1"
 "aqua:apple/pkl" = "0.32.2"
 yamlfmt = "0.21.0"                 # YAML formatter (hk pairs it with yamllint)
 yamllint = "1.38.0"
