@@ -24,7 +24,7 @@ task.source_freshness_hash_contents = true
 # local work and CI never does (it sets MISE_ENV=ci). A tool sits here when both
 # need it.
 [tools]
-mr-boxington = { version = "1.29.1", workflow = "release.yml@refs/heads/main" }
+mr-boxington = { version = "1.29.2", workflow = "release.yml@refs/heads/main" }
 # The guest observer ships as a static musl binary (the Kata guest image is not
 # guaranteed to have a compatible libc).
 rust = { version = "1.99.1", mr_boxington = true, components = "clippy,rustfmt", targets = "x86_64-unknown-linux-musl" }
