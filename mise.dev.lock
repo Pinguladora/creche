@@ -202,4 +202,3 @@ url_api = "https://api.github.com/repos/google/yamlfmt/releases/assets/336650206
 version = "1.38.0"
 backend = "pypi:yamllint"
 specifiers = ["1.38.0"]
-uv = { path = ".mise/locks/mise.dev/yamllint/1.38.0", digest = "sha256:9dec230106074d8b6aa368807ca3a1f2d1f88e503daa773a57b4f00fdebfdf87" }
