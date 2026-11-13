@@ -3,33 +3,27 @@
 lockfile_version = 4
 
 [[tools."aqua:apple/pkl"]]
-version = "0.32.2"
+version = "0.33.0"
 backend = "aqua:apple/pkl"
-specifiers = ["0.32.2"]
+specifiers = ["0.33.0"]
 
 [tools."aqua:apple/pkl"."platforms.linux-x64"]
-checksum = "sha256:874c75484c79add77fb2346ea4ab2e8875eea35fb707894bf5457a2df5d03def"
+checksum = "sha256:b9a6ddea6b382b7d4db4cf78e77aa3858e0c8a7e02939d2ba298574b5d1fcc69"
 checksum_source = "mise-versions"
-url = "https://github.com/apple/pkl/releases/download/0.32.2/pkl-linux-amd64"
-url_api = "https://api.github.com/repos/apple/pkl/releases/assets/663850808"
+url = "https://github.com/apple/pkl/releases/download/0.33.0/pkl-linux-amd64"
+url_api = "https://api.github.com/repos/apple/pkl/releases/assets/714756975"
 
 [tools."aqua:apple/pkl"."platforms.linux-x64-musl"]
-checksum = "sha256:874c75484c79add77fb2346ea4ab2e8875eea35fb707894bf5457a2df5d03def"
+checksum = "sha256:b9a6ddea6b382b7d4db4cf78e77aa3858e0c8a7e02939d2ba298574b5d1fcc69"
 checksum_source = "mise-versions"
-url = "https://github.com/apple/pkl/releases/download/0.32.2/pkl-linux-amd64"
-url_api = "https://api.github.com/repos/apple/pkl/releases/assets/663850808"
-
-[tools."aqua:apple/pkl"."platforms.macos-x64"]
-checksum = "sha256:3c4c914a75210d3f3292740b4a8d447f9f832e81b60720bec57221e884717eee"
-checksum_source = "mise-versions"
-url = "https://github.com/apple/pkl/releases/download/0.32.2/pkl-macos-amd64"
-url_api = "https://api.github.com/repos/apple/pkl/releases/assets/663850987"
+url = "https://github.com/apple/pkl/releases/download/0.33.0/pkl-linux-amd64"
+url_api = "https://api.github.com/repos/apple/pkl/releases/assets/714756975"
 
 [tools."aqua:apple/pkl"."platforms.windows-x64"]
-checksum = "sha256:ac3c55c2e43c20964dc5faf51e47bf73a90150dfe1874aa37753651753edf201"
+checksum = "sha256:9875af0d17d3535ed0e3903f3ae71fc8007268949328f73c2d12942fca11840c"
 checksum_source = "mise-versions"
-url = "https://github.com/apple/pkl/releases/download/0.32.2/pkl-windows-amd64.exe"
-url_api = "https://api.github.com/repos/apple/pkl/releases/assets/663854370"
+url = "https://github.com/apple/pkl/releases/download/0.33.0/pkl-windows-amd64.exe"
+url_api = "https://api.github.com/repos/apple/pkl/releases/assets/714757051"
 
 [[tools."aqua:jdx/hk"]]
 version = "2.11.1"
@@ -112,32 +106,32 @@ url = "https://github.com/sourcefrog/cargo-mutants/releases/download/v27.1.0/car
 url_api = "https://api.github.com/repos/sourcefrog/cargo-mutants/releases/assets/436338014"
 
 [[tools.kingfisher]]
-version = "2.16.0"
+version = "2.17.0"
 backend = "github:mongodb/kingfisher"
-specifiers = ["2.16.0"]
+specifiers = ["2.17.0"]
 
 [tools.kingfisher."platforms.linux-x64"]
-checksum = "sha256:97cdbe7706a722ea085d1e83a00a98b0e9432fc58b21c9a3e36f591b5c1446d7"
-url = "https://github.com/mongodb/kingfisher/releases/download/v2.16.0/kingfisher-linux-x64.tgz"
-url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/690712389"
+checksum = "sha256:8798879183d74f9e1379af3071f296853e4027a21bfde5d13d9b064fa1bf1eb3"
+url = "https://github.com/mongodb/kingfisher/releases/download/v2.17.0/kingfisher-linux-x64.tgz"
+url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/715173472"
 provenance = "github-attestations"
 
 [tools.kingfisher."platforms.linux-x64-musl"]
-checksum = "sha256:97cdbe7706a722ea085d1e83a00a98b0e9432fc58b21c9a3e36f591b5c1446d7"
-url = "https://github.com/mongodb/kingfisher/releases/download/v2.16.0/kingfisher-linux-x64.tgz"
-url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/690712389"
+checksum = "sha256:8798879183d74f9e1379af3071f296853e4027a21bfde5d13d9b064fa1bf1eb3"
+url = "https://github.com/mongodb/kingfisher/releases/download/v2.17.0/kingfisher-linux-x64.tgz"
+url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/715173472"
 provenance = "github-attestations"
 
 [tools.kingfisher."platforms.macos-x64"]
-checksum = "sha256:6b9a9bfbc6afb1c2256d16c01e61db8d803fe4b00394cfa1d7be65a6d29aff53"
-url = "https://github.com/mongodb/kingfisher/releases/download/v2.16.0/kingfisher-darwin-x64.tgz"
-url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/690712651"
+checksum = "sha256:1f28177c3058b6e381d9feec10ad4d0681b41d3c153613a4ba79d806a23d6953"
+url = "https://github.com/mongodb/kingfisher/releases/download/v2.17.0/kingfisher-darwin-x64.tgz"
+url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/715173914"
 provenance = "github-attestations"
 
 [tools.kingfisher."platforms.windows-x64"]
-checksum = "sha256:81e5529eea96d441b75eb34b02222386f5b66506fb9cf1c97968716962c445f8"
-url = "https://github.com/mongodb/kingfisher/releases/download/v2.16.0/kingfisher-windows-x64.zip"
-url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/690712273"
+checksum = "sha256:541df38ed22f20b6c50ea8a7ec6ec714664d51ffb562f37bc73d770b88fc7456"
+url = "https://github.com/mongodb/kingfisher/releases/download/v2.17.0/kingfisher-windows-x64.zip"
+url_api = "https://api.github.com/repos/mongodb/kingfisher/releases/assets/715173316"
 provenance = "github-attestations"
 
 [[tools.pinact]]
