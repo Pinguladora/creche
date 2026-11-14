@@ -589,7 +589,74 @@ technical_assets:
     data_assets_stored: []
     data_formats_accepted: [json, file]
     communication_links:
-      Read Trail:
+      Read Evidence:
+        target: audit-evidence
+        description: Reads the exported lines, the trust bundle and the pod history named on its command line
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [audit-trail, pod-history]
+
+  Audit Evidence:
+    id: audit-evidence
+    description: The files the auditor exported for a check, the stream lines, the trust bundle and the pod history
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: component
+    technologies: [local-file-system]
+    tags: []
+    internet: false
+    machine: physical
+    encryption: none
+    owner: Security Team
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: A changed export misleads the check
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [audit-trail, pod-history]
+    data_formats_accepted: [json, file]
+    communication_links: {}
+
+  Evidence Export:
+    id: evidence-export
+    description: The auditor's own tools that export the stream lines from the central store and the pod history from the cluster, such as the store's client and kubectl
+    type: process
+    usage: business
+    used_as_client_by_human: true
+    out_of_scope: true
+    justification_out_of_scope: The auditor's tools, not part of creche
+    size: application
+    technologies: [cli]
+    tags: []
+    internet: false
+    machine: physical
+    encryption: none
+    owner: Security Team
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Produces what the verifier checks
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [audit-trail, pod-history]
+    data_assets_stored: []
+    data_formats_accepted: [json]
+    communication_links:
+      Export Trail:
         target: log-store
         description: Exports the stream lines to verify
         protocol: https
@@ -603,9 +670,9 @@ technical_assets:
         usage: business
         data_assets_sent: []
         data_assets_received: [audit-trail]
-      Pod History:
+      Export Pod History:
         target: kube-api
-        description: Pod uids and their nodes
+        description: Pod uids and the nodes they ran on
         protocol: https
         authentication: token
         identity: end-user
@@ -617,6 +684,20 @@ technical_assets:
         usage: devops
         data_assets_sent: []
         data_assets_received: [pod-history]
+      Write Evidence:
+        target: audit-evidence
+        description: Saves the exports for the verifier
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail, pod-history]
+        data_assets_received: []
 
   Kubernetes API:
     id: kube-api
@@ -1025,7 +1106,7 @@ trust_boundaries:
     description: Where the audit trail is kept and checked, out of reach of the nodes
     type: network-cloud-provider
     tags: []
-    technical_assets_inside: [log-store, creche-verifier]
+    technical_assets_inside: [log-store, creche-verifier, audit-evidence, evidence-export]
     trust_boundaries_nested: []
 
   Maintainer Machine:
@@ -1118,19 +1199,34 @@ risk_tracking:
     justification: The verifier is a command line tool that reads the files the auditor names, not an upload.
     date: 2026-11-14
 
-  server-side-request-forgery@creche-verifier@log-store@creche-verifier>read-trail:
-    status: false-positive
-    justification: The verifier makes no requests. It reads files the auditor exported.
-    date: 2026-11-14
-
-  server-side-request-forgery@creche-verifier@kube-api@creche-verifier>pod-history:
-    status: false-positive
-    justification: The verifier makes no requests. It reads the pod history file the auditor exported.
-    date: 2026-11-14
-
-  missing-identity-store@creche-verifier:
+  missing-identity-store@evidence-export:
     status: accepted
-    justification: Identities come from SPIRE and the cluster, both outside creche.
+    justification: Identities come from SPIRE, the cluster and the central store, all outside creche.
+    date: 2026-11-14
+
+  path-traversal@creche-verifier@audit-evidence@creche-verifier>read-evidence:
+    status: false-positive
+    justification: The verifier opens only the files named on its command line. No path comes from the data it reads.
+    date: 2026-11-14
+
+  missing-hardening@audit-evidence:
+    status: accepted
+    justification: The exports are the auditor's files. The verifier checks the stream lines against their hash chain and signatures, but it trusts the bundle and the pod history it is given, so the auditor must take them from trusted sources and keep them unchanged.
+    date: 2026-11-14
+
+  unencrypted-asset@audit-evidence:
+    status: accepted
+    justification: Encryption at rest of the auditor's machine is the auditor's.
+    date: 2026-11-14
+
+  missing-authentication-second-factor@creche-verifier>read-evidence@creche-verifier@audit-evidence:
+    status: accepted
+    justification: Local files on the auditor's machine, behind its own login.
+    date: 2026-11-14
+
+  missing-authentication-second-factor@evidence-export>write-evidence@evidence-export@audit-evidence:
+    status: accepted
+    justification: Local files on the auditor's machine, behind its own login.
     date: 2026-11-14
 
   missing-cloud-hardening@cluster-network:
@@ -1172,12 +1268,12 @@ risk_tracking:
 
   code-backdooring@github-actions:
     status: mitigated
-    justification: Actions are pinned by digest, harden-runner blocks egress outside an allowlist in every workflow, and zizmor checks the workflows.
+    justification: Actions are pinned by digest, harden-runner blocks egress outside an allowlist in every workflow, and zizmor checks the workflows. The SLSA generator is the exception, referenced by its tag v2.1.0 because slsa-verifier checks that tag (.github/zizmor.yml). A tag moved upstream would run another generator with the release's id-token permission.
     date: 2026-11-14
 
   missing-hardening@github-actions:
     status: mitigated
-    justification: Workflows default to no permissions, harden-runner blocks egress, actions are pinned by digest and zizmor checks the workflows.
+    justification: Workflows default to no permissions, harden-runner blocks egress, actions are pinned by digest except the SLSA generator, which slsa-verifier needs by tag, and zizmor checks the workflows.
     date: 2026-11-14
 
   missing-cloud-hardening@github:
