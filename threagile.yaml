@@ -1,0 +1,1253 @@
+threagile_version: 1.0.0
+
+# creche: an eBPF observer inside Kata Containers microVMs that streams what AI agent tools do to a sink on the host.
+# Written from the README, SECURITY.md and the ADRs in docs/adr (up to 0017).
+
+title: creche
+
+date: 2026-11-14
+
+author:
+  name: creche maintainers
+  homepage: https://github.com/Pinguladora/creche
+
+business_criticality: important
+
+business_overview:
+  description: Visibility into what runs inside Kata Containers microVMs. Process trees, outgoing connections and file writes of the tools an AI agent spawns are streamed to the host, attributed to the sandbox and its pod, and kept as a tamper-evident audit trail.
+  images: []
+
+technical_overview:
+  description: An observer in the guest loads BPF programs (aya) and forwards their ring buffer records over hybrid vsock. The sink on the host attests which sandbox a connection comes from, names its pod from containerd's bundles, writes JSON lines with hash chained and SVID signed checkpoints, and exports them over OTLP. A verifier checks saved output against the trust bundle and the pod history. Releases are built, signed and published by GitHub Actions.
+  images: []
+
+questions: {}
+
+abuse_cases:
+  Forged Events: A process in the guest sends records the host takes for the observer's.
+  Misattribution: A guest or a host process makes events appear under another sandbox, pod or container.
+  Blinding: The guest floods or stalls the sink so that events of other sandboxes are lost.
+  Audit Rewrite: Whoever takes over a sink or the archive rewrites the audit trail without detection.
+  Release Tampering: A modified observer or sink binary reaches the guest image or the nodes.
+
+security_requirements:
+  Guest Untrusted: Nothing the guest sends may crash, stall or mislead the sink.
+  Host Attests Identity: The sandbox, pod and node of a stream come from the host, never from the guest.
+  Tamper Evident Trail: Missing or changed lines must be detectable by a verifier.
+  Verifiable Releases: Every release carries signed checksums and SLSA provenance.
+
+tags_available: []
+
+data_assets:
+
+  Guest Events:
+    id: guest-events
+    description: Process, connect and file write records from the guest, with command arguments, paths and destinations
+    usage: business
+    tags: []
+    origin: Guest kernel
+    owner: Platform Team
+    quantity: very-many
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Command arguments and paths can hold secrets, and the events are the evidence of what an agent did
+
+  Agent Labels:
+    id: agent-labels
+    description: user.creche.agent extended attributes the agents set on their delegated cgroups
+    usage: business
+    tags: []
+    origin: Agents
+    owner: Agent operators
+    quantity: few
+    confidentiality: internal
+    integrity: important
+    availability: operational
+    justification_cia_rating: Claims of the guest, reported next to the uid that owns the cgroup
+
+  Pod Identity:
+    id: pod-identity
+    description: Pod name, namespace and uid from the annotations in the sandbox's OCI spec
+    usage: business
+    tags: []
+    origin: containerd and kubelet
+    owner: Platform Team
+    quantity: many
+    confidentiality: internal
+    integrity: critical
+    availability: important
+    justification_cia_rating: Wrong pod identity attributes events to the wrong workload
+
+  Audit Trail:
+    id: audit-trail
+    description: JSON lines with stream sequence numbers, hash chained checkpoints and their signatures
+    usage: business
+    tags: []
+    origin: creche-sink
+    owner: Security Team
+    quantity: very-many
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: The evidence for incident response, holds the guest events
+
+  Sink Signing Keys:
+    id: sink-keys
+    description: The sink's X.509-SVID and the per stream P-256 keys that sign checkpoints
+    usage: devops
+    tags: []
+    origin: SPIRE
+    owner: Platform Team
+    quantity: few
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Whoever holds them can sign forged checkpoints for the node
+
+  Pod History:
+    id: pod-history
+    description: Lines of pod uid or sandbox id and the node they ran on, and the SPIFFE trust bundle
+    usage: devops
+    tags: []
+    origin: Kubernetes API and SPIRE
+    owner: Security Team
+    quantity: many
+    confidentiality: internal
+    integrity: critical
+    availability: operational
+    justification_cia_rating: The verifier binds each stream to its node with it
+
+  Release Artifacts:
+    id: release-artifacts
+    description: Static musl builds of creche-observer and creche-sink, signed checksums and SLSA provenance
+    usage: devops
+    tags: []
+    origin: GitHub Actions
+    owner: creche maintainers
+    quantity: few
+    confidentiality: public
+    integrity: mission-critical
+    availability: operational
+    justification_cia_rating: The observer runs in every guest and the sink as root on every node
+
+  Source Code:
+    id: source-code
+    description: The creche repository, BPF C and Rust
+    usage: devops
+    tags: []
+    origin: creche maintainers
+    owner: creche maintainers
+    quantity: many
+    confidentiality: public
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Open source, but every release is built from it
+
+  CI Credentials:
+    id: ci-credentials
+    description: GitHub tokens and the OIDC identity of the release workflow
+    usage: devops
+    tags: []
+    origin: GitHub
+    owner: creche maintainers
+    quantity: few
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: They publish and sign releases
+
+  Developer Secrets:
+    id: developer-secrets
+    description: Environment variables and secrets the mise MCP server exposes to coding agents
+    usage: devops
+    tags: []
+    origin: Maintainer
+    owner: creche maintainers
+    quantity: few
+    confidentiality: confidential
+    integrity: important
+    availability: operational
+    justification_cia_rating: Tokens for GitHub and other services
+
+technical_assets:
+
+  Agent Workload:
+    id: agent-workload
+    description: The AI agent and the tools it spawns, the untrusted party in the guest
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: The workload creche observes, untrusted by design
+    size: application
+    technologies: [ai-agent]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Agent operators
+    confidentiality: confidential
+    integrity: important
+    availability: operational
+    justification_cia_rating: Runs arbitrary tools
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links:
+      Traced Syscalls:
+        target: creche-bpf
+        description: exec, fork, exit, connect and file opens for writing hit the tracepoints, fentry and LSM hooks, and cgroup labels are read from cgroupfs
+        protocol: inter-process-communication
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [guest-events, agent-labels]
+        data_assets_received: []
+
+  creche BPF Programs:
+    id: creche-bpf
+    description: C BPF programs with CO-RE in the guest kernel, dropping noise in the kernel, a pid indexed task cache and the LSM guard on the observer's vsock port
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: component
+    technologies: [ids]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Run in the guest kernel, see every traced event
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links: {}
+
+  creche Observer:
+    id: creche-observer
+    description: Loads the BPF programs with aya, drains the ring buffer and forwards whole records over vsock, started by systemd before kata-agent
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: service
+    technologies: [ids]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Root in the guest, the only process allowed on the vsock port
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Ring Buffer:
+        target: creche-bpf
+        description: Loads and attaches the programs, then drains their ring buffer at most every 20 ms
+        protocol: inter-process-communication
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [guest-events, agent-labels]
+      Vsock Stream:
+        target: kata-vmm
+        description: Framed wire records to host port 7000, refused to every other guest process by the LSM guard
+        protocol: binary
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [guest-events, agent-labels]
+        data_assets_received: []
+
+  Kata VMM:
+    id: kata-vmm
+    description: Cloud Hypervisor or Firecracker, which bridges guest vsock to a Unix socket on the host
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Part of Kata Containers
+    size: system
+    technologies: [container-platform]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Kata Containers
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: Holds the whole sandbox
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Hybrid Vsock:
+        target: creche-sink
+        description: The VMM connects to the sink's clh.sock_7000, mode 0600 and owned by the VMM's user. The sink checks the peer's credentials and /proc for the process holding that sandbox's vsock socket, at most 4 connections per sandbox
+        protocol: inter-process-communication
+        authentication: credentials
+        identity: workload
+        authorization: object-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [guest-events, agent-labels]
+        data_assets_received: []
+
+  creche Sink:
+    id: creche-sink
+    description: Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: service
+    technologies: [monitoring]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: Root or the VMM's user on every node, parses input from untrusted guests and holds the signing keys
+    multi_tenant: true
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [guest-events, agent-labels, pod-identity, audit-trail, sink-keys]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Read Bundle:
+        target: containerd-bundles
+        description: Reads the sandbox's OCI spec, accepted only from a root owned private bundle
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [pod-identity]
+      Workload API:
+        target: spire-agent
+        description: Fetches the X.509-SVID over the SPIFFE Workload API Unix socket
+        protocol: inter-process-communication
+        authentication: none
+        identity: workload
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: devops
+        data_assets_sent: []
+        data_assets_received: [sink-keys]
+      Write Archive:
+        target: audit-archive
+        description: JSON lines on stdout, redirected to a file
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail]
+        data_assets_received: []
+      OTLP Export:
+        target: otel-collector
+        description: OTLP over gRPC or HTTP, zstd protobuf, in cleartext to a collector on the node
+        protocol: binary
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail]
+        data_assets_received: []
+
+  containerd Bundles:
+    id: containerd-bundles
+    description: containerd's runtime v2 task directory with each sandbox's config.json
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Owned by containerd
+    size: component
+    technologies: [local-file-system]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: internal
+    integrity: critical
+    availability: important
+    justification_cia_rating: Root only
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [pod-identity]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+  SPIRE Agent:
+    id: spire-agent
+    description: Attests the sink and issues its node specific SVID
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Part of the cluster's SPIRE deployment
+    size: service
+    technologies: [identity-provider]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Issues identities
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [sink-keys]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links: {}
+
+  Audit Archive:
+    id: audit-archive
+    description: The JSON lines file on the node
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: component
+    technologies: [local-file-system]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: The audit trail at rest
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [audit-trail]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+  OTel Collector:
+    id: otel-collector
+    description: A node collector that ships the lines to a second store
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Operated by the platform team
+    size: service
+    technologies: [monitoring]
+    tags: []
+    internet: false
+    machine: container
+    encryption: none
+    owner: Platform Team
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Carries the audit trail
+    multi_tenant: true
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [audit-trail]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Ship Logs:
+        target: log-store
+        description: Ships the log records to the central store
+        protocol: https
+        authentication: client-certificate
+        identity: workload
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail]
+        data_assets_received: []
+
+  Central Log Store:
+    id: log-store
+    description: The second store that keeps checkpoints out of reach of the node
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Operated by the security team
+    size: system
+    technologies: [database]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: transparent
+    owner: Security Team
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: The copy of the audit trail a node cannot reach
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [audit-trail]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+  creche Verifier:
+    id: creche-verifier
+    description: creche-sink --verify run by an auditor against saved output, a trust bundle, the sink SPIFFE IDs and the pod history
+    type: process
+    usage: business
+    used_as_client_by_human: true
+    out_of_scope: false
+    size: application
+    technologies: [cli]
+    tags: []
+    internet: false
+    machine: physical
+    encryption: none
+    owner: Security Team
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Decides whether the trail is intact
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [audit-trail, pod-history]
+    data_assets_stored: []
+    data_formats_accepted: [json, file]
+    communication_links:
+      Read Trail:
+        target: log-store
+        description: Exports the stream lines to verify
+        protocol: https
+        authentication: token
+        identity: end-user
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [audit-trail]
+      Pod History:
+        target: kube-api
+        description: Pod uids and their nodes
+        protocol: https
+        authentication: token
+        identity: end-user
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: devops
+        data_assets_sent: []
+        data_assets_received: [pod-history]
+
+  Kubernetes API:
+    id: kube-api
+    description: The cluster's API server
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Part of the cluster
+    size: system
+    technologies: [container-platform]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: The cluster
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: [pod-history]
+    data_assets_stored: [pod-history]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+  Maintainer Workstation:
+    id: maintainer-workstation
+    description: Where the maintainer works, with hk, mise and coding agents
+    type: process
+    usage: devops
+    used_as_client_by_human: true
+    out_of_scope: false
+    size: system
+    technologies: [devops-client]
+    tags: []
+    internet: true
+    machine: physical
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Pushes the code every release is built from
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [source-code, developer-secrets]
+    data_assets_stored: [source-code, developer-secrets]
+    data_formats_accepted: [file]
+    communication_links:
+      Push Branches:
+        target: github-repo
+        description: Branches and PRs, merged by the maintainer
+        protocol: https
+        authentication: token
+        identity: end-user
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: devops
+        data_assets_sent: [source-code]
+        data_assets_received: [source-code]
+
+  Coding Agent:
+    id: coding-agent
+    description: A coding agent on the workstation, with the hk and mise MCP servers from .mcp.json
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: application
+    technologies: [ai-agent]
+    tags: []
+    internet: true
+    machine: physical
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Edits the code and runs tools
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [source-code, developer-secrets]
+    data_assets_stored: []
+    data_formats_accepted: [file]
+    communication_links:
+      mise MCP:
+        target: mise-mcp
+        description: Tools, tasks and configuration, environment variables and secrets included
+        protocol: inter-process-communication
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: devops
+        data_assets_sent: []
+        data_assets_received: [developer-secrets]
+      Agent Pushes:
+        target: github-repo
+        description: Branches and PRs opened by the agent
+        protocol: https
+        authentication: token
+        identity: end-user
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: devops
+        data_assets_sent: [source-code]
+        data_assets_received: [source-code]
+
+  mise MCP Server:
+    id: mise-mcp
+    description: mise mcp, started by the coding agent
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: component
+    technologies: [mcp-server]
+    tags: []
+    internet: false
+    machine: physical
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: important
+    availability: operational
+    justification_cia_rating: Exposes the environment
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [developer-secrets]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links: {}
+
+  GitHub Repository:
+    id: github-repo
+    description: Pinguladora/creche
+    type: datastore
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: system
+    technologies: [sourcecode-repository]
+    tags: []
+    internet: true
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: public
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Public source
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: [source-code]
+    data_assets_stored: [source-code]
+    data_formats_accepted: [file]
+    communication_links: {}
+
+  Renovate:
+    id: renovate
+    description: Opens dependency update PRs, security fixes trigger a patch release once merged
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Hosted bot
+    size: application
+    technologies: [tool]
+    tags: []
+    internet: true
+    machine: virtual
+    encryption: none
+    owner: Mend
+    confidentiality: public
+    integrity: important
+    availability: operational
+    justification_cia_rating: Proposes changes only
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: [source-code]
+    data_assets_stored: []
+    data_formats_accepted: [file]
+    communication_links:
+      Update PRs:
+        target: github-repo
+        description: Dependency update branches and PRs
+        protocol: https
+        authentication: token
+        identity: service-account
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: devops
+        data_assets_sent: [source-code]
+        data_assets_received: [source-code]
+
+  GitHub Actions:
+    id: github-actions
+    description: CI, the release and auto-release workflows, hardened runners with egress allowlists
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: system
+    technologies: [build-pipeline]
+    tags: []
+    internet: true
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: operational
+    justification_cia_rating: Builds and signs every release
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: true
+    data_assets_processed: [source-code, release-artifacts, ci-credentials]
+    data_assets_stored: []
+    data_formats_accepted: [file]
+    communication_links:
+      Checkout:
+        target: github-repo
+        description: Checks out the tagged source
+        protocol: https
+        authentication: short-lived-token
+        identity: workload
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: devops
+        data_assets_sent: []
+        data_assets_received: [source-code]
+      Keyless Signing:
+        target: sigstore
+        description: Fulcio certificate for the workflow's OIDC identity, Rekor entry for checksums.txt
+        protocol: https
+        authentication: short-lived-token
+        identity: workload
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: devops
+        data_assets_sent: [ci-credentials, release-artifacts]
+        data_assets_received: []
+      Publish Release:
+        target: github-releases
+        description: Tarballs, checksums.txt with its sigstore bundle and the SLSA provenance
+        protocol: https
+        authentication: short-lived-token
+        identity: workload
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: devops
+        data_assets_sent: [release-artifacts]
+        data_assets_received: []
+
+  Sigstore:
+    id: sigstore
+    description: Public Fulcio and Rekor
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Public good service
+    size: system
+    technologies: [identity-provider]
+    tags: []
+    internet: true
+    machine: virtual
+    encryption: none
+    owner: OpenSSF
+    confidentiality: public
+    integrity: mission-critical
+    availability: operational
+    justification_cia_rating: Root of the release signatures
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: [release-artifacts]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links: {}
+
+  GitHub Releases:
+    id: github-releases
+    description: Release downloads of Pinguladora/creche
+    type: datastore
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: system
+    technologies: [artifact-registry]
+    tags: []
+    internet: true
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: public
+    integrity: mission-critical
+    availability: operational
+    justification_cia_rating: What the nodes and guest images install
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: [release-artifacts]
+    data_assets_stored: [release-artifacts]
+    data_formats_accepted: [file]
+    communication_links: {}
+
+  Image Builder:
+    id: image-builder
+    description: The platform team's build of the Kata guest image and the node image, which verify and install a release
+    type: process
+    usage: devops
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Operated by the platform team
+    size: application
+    technologies: [build-pipeline]
+    tags: []
+    internet: true
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: internal
+    integrity: mission-critical
+    availability: operational
+    justification_cia_rating: Puts the binaries on every node and into every guest
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [release-artifacts]
+    data_assets_stored: []
+    data_formats_accepted: [file]
+    communication_links:
+      Download Release:
+        target: github-releases
+        description: Downloads and checks sha256sum, cosign verify-blob and slsa-verifier
+        protocol: https
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: devops
+        data_assets_sent: []
+        data_assets_received: [release-artifacts]
+
+trust_boundaries:
+
+  Kata Guest:
+    id: kata-guest
+    description: The microVM with its own kernel, untrusted by the host
+    type: execution-environment
+    tags: []
+    technical_assets_inside: [agent-workload, creche-bpf, creche-observer]
+    trust_boundaries_nested: []
+
+  Node:
+    id: node
+    description: A Kubernetes node running Kata sandboxes
+    type: execution-environment
+    tags: []
+    technical_assets_inside: [kata-vmm, creche-sink, containerd-bundles, spire-agent, audit-archive, otel-collector]
+    trust_boundaries_nested: [kata-guest]
+
+  Cluster Network:
+    id: cluster-network
+    description: The cluster and its control plane
+    type: network-cloud-security-group
+    tags: []
+    technical_assets_inside: [kube-api]
+    trust_boundaries_nested: [node]
+
+  Security Backend:
+    id: security-backend
+    description: Where the audit trail is kept and checked, out of reach of the nodes
+    type: network-cloud-provider
+    tags: []
+    technical_assets_inside: [log-store, creche-verifier]
+    trust_boundaries_nested: []
+
+  Maintainer Machine:
+    id: maintainer-machine
+    description: The maintainer's workstation
+    type: network-on-prem
+    tags: []
+    technical_assets_inside: [maintainer-workstation, coding-agent, mise-mcp]
+    trust_boundaries_nested: []
+
+  GitHub:
+    id: github
+    description: GitHub's hosted repository, runners and releases
+    type: network-cloud-provider
+    tags: []
+    technical_assets_inside: [github-repo, github-actions, github-releases]
+    trust_boundaries_nested: []
+
+shared_runtimes:
+
+  Guest Kernel:
+    id: guest-kernel
+    description: Kata's guest kernel with BTF, fentry and BPF LSM, shared by the agent and the observer
+    tags: []
+    technical_assets_running: [agent-workload, creche-bpf, creche-observer]
+
+  Host Kernel:
+    id: host-kernel
+    description: The node's kernel, shared by the VMM, the sink and the node agents
+    tags: []
+    technical_assets_running: [kata-vmm, creche-sink, spire-agent, otel-collector]
+
+individual_risk_categories: {}
+
+# Statuses reflect the controls in this repository. Risks of the integrator's own deployment are accepted here and
+# left to it. Risks still open for a decision are not listed and show as unchecked.
+risk_tracking:
+
+  # The guest and the sink
+
+  untrusted-deserialization@creche-sink:
+    status: mitigated
+    justification: The guest is untrusted by design (SECURITY.md). creche-wire decodes records with bounds checks and no copies (ADR 0004), and the fuzz targets decode and sink_stream exercise the decoder and the sink's stream handling.
+    date: 2026-11-14
+
+  untrusted-deserialization@creche-observer:
+    status: mitigated
+    justification: The observer forwards records without decoding them (ADR 0004). Agent labels read from cgroup extended attributes are checked against the key and value rules and capped at 8 before they are sent (ADR 0017).
+    date: 2026-11-14
+
+  path-traversal@creche-sink@containerd-bundles@creche-sink>read-bundle:
+    status: mitigated
+    justification: Sandbox ids must be containerd identifiers (valid_id in listen.rs), and the bundle must be owned by root and private to it, or the pod is reported as unknown (ADR 0010).
+    date: 2026-11-14
+
+  path-traversal@creche-sink@audit-archive@creche-sink>write-archive:
+    status: false-positive
+    justification: The sink writes to stdout only. The operator's redirect names the file, and no path comes from the guest.
+    date: 2026-11-14
+
+  missing-vault@creche-sink:
+    status: mitigated
+    justification: The SVID comes from the SPIFFE Workload API, and each stream's signing key lives in memory only and is erased once the next key is derived (ADR 0014).
+    date: 2026-11-14
+
+  kubernetes-api-write-access@creche-observer@creche-observer>vsock-stream:
+    status: false-positive
+    justification: The VMM is tagged container-platform because the technology list has no hypervisor. The observer does not reach the Kubernetes API.
+    date: 2026-11-14
+
+  wrong-communication-link-content@creche-observer@creche-observer>ring-buffer:
+    status: false-positive
+    justification: The observer writes its own pid and port into the programs before they load, configuration rather than a data asset.
+    date: 2026-11-14
+
+  # Audit trail at rest and its checks
+
+  missing-hardening@audit-archive:
+    status: accepted
+    justification: The archive is the integrator's file on the node. The hash chain proves integrity only as far as its checkpoints are shipped to a second store (README, ADR 0012).
+    date: 2026-11-14
+
+  unencrypted-asset@audit-archive:
+    status: accepted
+    justification: Encryption at rest of the node's disk is the integrator's. The central store is encrypted.
+    date: 2026-11-14
+
+  missing-file-validation@creche-verifier:
+    status: false-positive
+    justification: The verifier is a command line tool that reads the files the auditor names, not an upload.
+    date: 2026-11-14
+
+  server-side-request-forgery@creche-verifier@log-store@creche-verifier>read-trail:
+    status: false-positive
+    justification: The verifier makes no requests. It reads files the auditor exported.
+    date: 2026-11-14
+
+  server-side-request-forgery@creche-verifier@kube-api@creche-verifier>pod-history:
+    status: false-positive
+    justification: The verifier makes no requests. It reads the pod history file the auditor exported.
+    date: 2026-11-14
+
+  missing-identity-store@creche-verifier:
+    status: accepted
+    justification: Identities come from SPIRE and the cluster, both outside creche.
+    date: 2026-11-14
+
+  missing-cloud-hardening@cluster-network:
+    status: accepted
+    justification: The cluster is the integrator's.
+    date: 2026-11-14
+
+  missing-cloud-hardening@security-backend:
+    status: accepted
+    justification: The security backend is the integrator's.
+    date: 2026-11-14
+
+  # Build and release
+
+  missing-authentication@image-builder>download-release@image-builder@github-releases:
+    status: mitigated
+    justification: Releases are public. Integrity comes from sha256sum, cosign verify-blob pinned to the release workflow's identity and slsa-verifier (README, Releases).
+    date: 2026-11-14
+
+  unguarded-access-from-internet@github-releases@github-actions@github-actions>publish-release:
+    status: accepted
+    justification: Releases are public by design. Publishing needs the workflow's token.
+    date: 2026-11-14
+
+  unguarded-access-from-internet@github-releases@image-builder@image-builder>download-release:
+    status: accepted
+    justification: Releases are public by design and verified by signature and provenance.
+    date: 2026-11-14
+
+  unguarded-access-from-internet@github-repo@*@*:
+    status: accepted
+    justification: The repository is public. Pushes need an authenticated GitHub identity.
+    date: 2026-11-14
+
+  code-backdooring@github-releases:
+    status: mitigated
+    justification: checksums.txt is signed keyless with cosign, every tarball has SLSA provenance, and the release workflow's last job downloads and verifies the release.
+    date: 2026-11-14
+
+  code-backdooring@github-actions:
+    status: mitigated
+    justification: Actions are pinned by digest, harden-runner blocks egress outside an allowlist in every workflow, and zizmor checks the workflows.
+    date: 2026-11-14
+
+  missing-hardening@github-actions:
+    status: mitigated
+    justification: Workflows default to no permissions, harden-runner blocks egress, actions are pinned by digest and zizmor checks the workflows.
+    date: 2026-11-14
+
+  missing-cloud-hardening@github:
+    status: accepted
+    justification: GitHub's hosting is not ours to harden. What we control is covered by the build and release entries above, and Scorecard runs on the repository.
+    date: 2026-11-14
+
+  missing-file-validation@github-actions:
+    status: false-positive
+    justification: The workflows take no uploads, only the repository's own checkout.
+    date: 2026-11-14
+
+  server-side-request-forgery@github-actions@*@*:
+    status: mitigated
+    justification: The workflows call fixed endpoints, and harden-runner blocks egress outside an allowlist.
+    date: 2026-11-14
+
+  unchecked-deployment@github-actions:
+    status: mitigated
+    justification: CI runs fmt, clippy, cargo-deny, the fuzz build and the tests, and Trivy, zizmor and Scorecard run in their own workflows.
+    date: 2026-11-14
+
+  unchecked-deployment@github-repo:
+    status: mitigated
+    justification: Every change is checked by CI, see unchecked-deployment@github-actions.
+    date: 2026-11-14
+
+  unchecked-deployment@github-releases:
+    status: mitigated
+    justification: Releases are built only by the checked release workflow, see unchecked-deployment@github-actions.
+    date: 2026-11-14
+
+  unchecked-deployment@image-builder:
+    status: accepted
+    justification: The image builds are the integrator's.
+    date: 2026-11-14
+
+  unchecked-deployment@maintainer-workstation:
+    status: mitigated
+    justification: hk runs the linters, cargo-deny and the kingfisher secret scan before each commit.
+    date: 2026-11-14
+
+  accidental-secret-leak@github-repo:
+    status: mitigated
+    justification: hk runs the kingfisher secret scan before each commit.
+    date: 2026-11-14
+
+  accidental-secret-leak@github-releases:
+    status: mitigated
+    justification: Releases hold only the reproducible builds, checksums and provenance.
+    date: 2026-11-14
+
+  unencrypted-asset@github-repo:
+    status: false-positive
+    justification: The source is public.
+    date: 2026-11-14
+
+  unencrypted-asset@github-releases:
+    status: false-positive
+    justification: The releases are public.
+    date: 2026-11-14
+
+  # Coding agents
+
+  unguarded-access-from-internet@mise-mcp@coding-agent@coding-agent>mise-mcp:
+    status: false-positive
+    justification: The mise MCP server talks over stdio to the agent that started it and listens on no port.
+    date: 2026-11-14
+
+  wrong-communication-link-content@coding-agent@coding-agent>mise-mcp:
+    status: false-positive
+    justification: The agent runs mise tasks through the server, actions rather than a data asset.
+    date: 2026-11-14
