@@ -298,11 +298,12 @@ technical_assets:
     description: Cloud Hypervisor or Firecracker, which bridges guest vsock to a Unix socket on the host
     type: process
     usage: business
+    layer: platform
     used_as_client_by_human: false
     out_of_scope: true
     justification_out_of_scope: Part of Kata Containers
     size: system
-    technologies: [container-platform]
+    technologies: [hypervisor]
     tags: []
     internet: false
     machine: virtual
@@ -421,6 +422,7 @@ technical_assets:
     description: containerd's runtime v2 task directory with each sandbox's config.json
     type: datastore
     usage: business
+    layer: platform
     used_as_client_by_human: false
     out_of_scope: true
     justification_out_of_scope: Owned by containerd
@@ -448,6 +450,7 @@ technical_assets:
     description: Attests the sink and issues its node specific SVID
     type: process
     usage: devops
+    layer: platform
     used_as_client_by_human: false
     out_of_scope: true
     justification_out_of_scope: Part of the cluster's SPIRE deployment
@@ -501,6 +504,7 @@ technical_assets:
     description: A node collector that ships the lines to a second store
     type: process
     usage: business
+    layer: platform
     used_as_client_by_human: false
     out_of_scope: true
     justification_out_of_scope: Operated by the platform team
@@ -704,6 +708,7 @@ technical_assets:
     description: The cluster's API server
     type: process
     usage: devops
+    layer: platform
     used_as_client_by_human: false
     out_of_scope: true
     justification_out_of_scope: Part of the cluster
@@ -1172,11 +1177,6 @@ risk_tracking:
     justification: The SVID comes from the SPIFFE Workload API, and each stream's signing key lives in memory only and is erased once the next key is derived (ADR 0014).
     date: 2026-11-14
 
-  kubernetes-api-write-access@creche-observer@creche-observer>vsock-stream:
-    status: false-positive
-    justification: The VMM is tagged container-platform because the technology list has no hypervisor. The observer does not reach the Kubernetes API.
-    date: 2026-11-14
-
   wrong-communication-link-content@creche-observer@creche-observer>ring-buffer:
     status: false-positive
     justification: The observer writes its own pid and port into the programs before they load, configuration rather than a data asset.
@@ -1217,16 +1217,6 @@ risk_tracking:
   unencrypted-asset@audit-evidence:
     status: accepted
     justification: Encryption at rest of the auditor's machine is the auditor's.
-    date: 2026-11-14
-
-  missing-authentication-second-factor@creche-verifier>read-evidence@creche-verifier@audit-evidence:
-    status: accepted
-    justification: Local files on the auditor's machine, behind its own login.
-    date: 2026-11-14
-
-  missing-authentication-second-factor@evidence-export>write-evidence@evidence-export@audit-evidence:
-    status: accepted
-    justification: Local files on the auditor's machine, behind its own login.
     date: 2026-11-14
 
   missing-cloud-hardening@cluster-network:
@@ -1337,11 +1327,6 @@ risk_tracking:
     date: 2026-11-14
 
   # Coding agents
-
-  unguarded-access-from-internet@mise-mcp@coding-agent@coding-agent>mise-mcp:
-    status: false-positive
-    justification: The mise MCP server talks over stdio to the agent that started it and listens on no port.
-    date: 2026-11-14
 
   wrong-communication-link-content@coding-agent@coding-agent>mise-mcp:
     status: false-positive
