@@ -1144,7 +1144,58 @@ shared_runtimes:
     tags: []
     technical_assets_running: [kata-vmm, creche-sink, spire-agent, otel-collector]
 
-individual_risk_categories: {}
+# Risks that the built-in rules cannot find, from reviews of the code. They stay unchecked until they are fixed.
+custom_risk_categories:
+  - id: vmm-impersonation
+    title: VMM Impersonation
+    description: The sink admits a connection on a sandbox's clh.sock_P only from the process it takes for the sandbox's VMM. It finds that process by a listening socket whose bound path, as the peer's /proc/<pid>/net/unix lists it, resolves to the sandbox's clh.sock. That path is only the name the socket was bound under. Its binder can replace it with a symlink to any sandbox's clh.sock, or a hardlink when it owns that file, or bind under the same path in a mount namespace of its own.
+    impact: Any process running as the VMM's user, the VMM of another sandbox included, can inject events under any sandbox's id and pod on the node. That defeats the attestation of the sandbox (ADR 0009), so the audit trail of every sandbox on the node can be forged.
+    asvs: "V8: Authorization"
+    cheat_sheet: https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html
+    action: Kernel-Attested Peer Identity
+    mitigation: Take the VMM's identity from the kernel instead of a path. A connection to clh.sock carries the credentials of the process listening on it. Pin that process by its pid and start time, and admit only it.
+    check: Is the VMM identified without reading a bound path back from /proc?
+    function: development
+    stride: spoofing
+    detection_logic: A review of the sink's peer admission (peer::check), reproduced with a same-user process that bound a socket and replaced its name with a symlink to another sandbox's clh.sock.
+    risk_assessment: Likely once an attacker runs as the VMM's user, for example after a virtual machine escape, and the impact is high, as it forges the attributed events of every sandbox on the node.
+    false_positives: None while the admission resolves bound paths.
+    model_failure_possible_reason: false
+    cwe: 290
+    risks_identified:
+      <b>VMM Impersonation</b> at <b>creche Sink</b> via <b>Hybrid Vsock</b>:
+        severity: high
+        exploitation_likelihood: likely
+        exploitation_impact: high
+        data_breach_probability: improbable
+        data_breach_technical_assets: []
+        most_relevant_technical_asset: creche-sink
+        most_relevant_communication_link: kata-vmm>hybrid-vsock
+
+  - id: sink-memory-exposure
+    title: Sink Memory Exposure
+    description: The sink runs as root or as the VMM's user, and sets neither PR_SET_DUMPABLE nor a seccomp filter. When it shares the VMM's user, a process of that user, such as code that escaped a guest, may attach to it with ptrace or read its /proc/<pid>/mem, as far as the host's ptrace restrictions allow, and take the signing keys of the open streams.
+    impact: An attacker with the keys of the open streams can sign forged checkpoints for the node.
+    asvs: "V13: Configuration"
+    cheat_sheet: https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html
+    action: Process Hardening
+    mitigation: Run the sink as another user than the VMM's, and have it mark itself not dumpable (PR_SET_DUMPABLE 0) when it starts, which keeps processes of the same user from attaching to it or reading its memory whatever the host's ptrace settings.
+    check: Does the sink run as another user than the VMM, or mark itself not dumpable?
+    function: development
+    stride: information-disclosure
+    detection_logic: A review of how the sink runs, while triaging the virtual machine escape of its host.
+    risk_assessment: Unlikely, as it needs a foothold as the VMM's user and a host that lets the same user ptrace. The impact is high, as the keys sign the audit trail.
+    false_positives: Sinks that run as root or as their own user, apart from the VMM's.
+    model_failure_possible_reason: false
+    cwe: 668
+    risks_identified:
+      <b>Sink Memory Exposure</b> at <b>creche Sink</b>:
+        severity: medium
+        exploitation_likelihood: unlikely
+        exploitation_impact: high
+        data_breach_probability: possible
+        data_breach_technical_assets: [creche-sink]
+        most_relevant_technical_asset: creche-sink
 
 # Statuses reflect the controls in this repository. Risks of the integrator's own deployment are accepted here and
 # left to it. Risks still open for a decision are not listed and show as unchecked.

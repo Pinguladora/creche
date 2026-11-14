@@ -41,20 +41,20 @@ Threagile toolkit was used to model the architecture of "creche" and derive risk
 
 Each risk finding references a chapter of the OWASP ASVS (Application Security Verification Standard) audit checklist. The OWASP ASVS checklist should be considered as an inspiration by architects and developers to further harden the application in a Defense-in-Depth approach. Additionally, for each risk finding a link towards a matching OWASP Cheat Sheet or similar with technical details about how to implement a mitigation is given.
 
-In total **51 initial risks** in **21 categories** have been identified during the threat modeling process:
+In total **53 initial risks** in **23 categories** have been identified during the threat modeling process:
 
 | Severity | Risks | Status | Risks |
 | --- | ---: | --- | ---: |
-| Critical | 0 | Unchecked | 13 |
-| High | 3 | In Discussion | 0 |
+| Critical | 0 | Unchecked | 15 |
+| High | 4 | In Discussion | 0 |
 | Elevated | 18 | Accepted | 15 |
-| Medium | 24 | In Progress | 0 |
+| Medium | 25 | In Progress | 0 |
 | Low | 6 | Mitigated | 15 |
 |  |  | False Positive | 8 |
 
 ## Impact Analysis of the Initial Risks
 
-The most prevalent impacts of the **51 initial risks** (distributed over **21 risk categories**) are (taking the severity ratings into account and using the highest for each category):
+The most prevalent impacts of the **53 initial risks** (distributed over **23 risk categories**) are (taking the severity ratings into account and using the highest for each category):
 
 - **High**: [Path-Traversal](#path-traversal): 3 Initial Risks, exploitation likelihood is _Very Likely_ with _High_ impact
 
@@ -63,6 +63,10 @@ The most prevalent impacts of the **51 initial risks** (distributed over **21 ri
 - **High**: [Prompt Injection](#prompt-injection): 1 Initial Risk, exploitation likelihood is _Very Likely_ with _High_ impact
 
     If this risk is unmitigated, attackers might make the model leak what it has access to, give misleading answers, or, for an agent, use its tools and permissions for their own goals.
+
+- **High**: [VMM Impersonation](#vmm-impersonation): 1 Initial Risk, exploitation likelihood is _Likely_ with _High_ impact
+
+    Any process running as the VMM's user, the VMM of another sandbox included, can inject events under any sandbox's id and pod on the node. That defeats the attestation of the sandbox (ADR 0009), so the audit trail of every sandbox on the node can be forged.
 
 - **Elevated**: [Excessive Agency](#excessive-agency): 1 Initial Risk, exploitation likelihood is _Likely_ with _Medium_ impact
 
@@ -128,6 +132,10 @@ The most prevalent impacts of the **51 initial risks** (distributed over **21 ri
 
     If this risk is unmitigated, attackers might be able to access sensitive services or files of network-reachable components by modifying outgoing calls of affected components.
 
+- **Medium**: [Sink Memory Exposure](#sink-memory-exposure): 1 Initial Risk, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    An attacker with the keys of the open streams can sign forged checkpoints for the node.
+
 - **Medium**: [Unchecked Deployment](#unchecked-deployment): 5 Initial Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
     If this risk remains unmitigated, vulnerabilities in custom-developed software or their dependencies might not be identified during continuous deployment cycles.
@@ -163,28 +171,32 @@ The following table gives a high-level overview of the risk tracking status (inc
 | Severity | Risks | Unchecked | In Discussion | Accepted | In Progress | Mitigated | False Positive |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Critical | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| High | 3 | 1 | 0 | 0 | 0 | 0 | 2 |
+| High | 4 | 2 | 0 | 0 | 0 | 0 | 2 |
 | Elevated | 18 | 5 | 0 | 7 | 0 | 4 | 2 |
-| Medium | 24 | 6 | 0 | 7 | 0 | 9 | 2 |
+| Medium | 25 | 7 | 0 | 7 | 0 | 9 | 2 |
 | Low | 6 | 1 | 0 | 1 | 0 | 2 | 2 |
 
-After removal of risks with status _mitigated_ and _false positive_ the following **28 remain unmitigated**:
+After removal of risks with status _mitigated_ and _false positive_ the following **30 remain unmitigated**:
 
 | Severity | Unmitigated risks | To be checked by | Unmitigated risks |
 | --- | ---: | --- | ---: |
 | Critical | 0 | Business Side | 1 |
-| High | 1 | Architecture | 12 |
-| Elevated | 12 | Development | 2 |
-| Medium | 13 | Operations | 13 |
+| High | 2 | Architecture | 12 |
+| Elevated | 12 | Development | 4 |
+| Medium | 14 | Operations | 13 |
 | Low | 2 |  |  |
 
 ## Impact Analysis of the Remaining Risks
 
-The most prevalent impacts of the **28 remaining risks** (distributed over **16 risk categories**) are (taking the severity ratings into account and using the highest for each category):
+The most prevalent impacts of the **30 remaining risks** (distributed over **18 risk categories**) are (taking the severity ratings into account and using the highest for each category):
 
 - **High**: [Prompt Injection](#prompt-injection): 1 Remaining Risk, exploitation likelihood is _Very Likely_ with _High_ impact
 
     If this risk is unmitigated, attackers might make the model leak what it has access to, give misleading answers, or, for an agent, use its tools and permissions for their own goals.
+
+- **High**: [VMM Impersonation](#vmm-impersonation): 1 Remaining Risk, exploitation likelihood is _Likely_ with _High_ impact
+
+    Any process running as the VMM's user, the VMM of another sandbox included, can inject events under any sandbox's id and pod on the node. That defeats the attestation of the sandbox (ADR 0009), so the audit trail of every sandbox on the node can be forged.
 
 - **Elevated**: [Excessive Agency](#excessive-agency): 1 Remaining Risk, exploitation likelihood is _Likely_ with _Medium_ impact
 
@@ -230,6 +242,10 @@ The most prevalent impacts of the **28 remaining risks** (distributed over **16 
 
     If this risk is unmitigated, attackers might be able to access or modify highly sensitive data without strong authentication.
 
+- **Medium**: [Sink Memory Exposure](#sink-memory-exposure): 1 Remaining Risk, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    An attacker with the keys of the open streams can sign forged checkpoints for the node.
+
 - **Medium**: [Unencrypted Technical Assets](#unencrypted-technical-assets): 3 Remaining Risks, exploitation likelihood is _Unlikely_ with _High_ impact
 
     If this risk is unmitigated, attackers might be able to access unencrypted data when successfully compromising sensitive components.
@@ -252,7 +268,7 @@ The most prevalent impacts of the **28 remaining risks** (distributed over **16 
 
 ## Risks by Severity
 
-All **51 risks** by severity, with their tracking status. Each risk links to its details in the chapter of its category.
+All **53 risks** by severity, with their tracking status. Each risk links to its details in the chapter of its category.
 
 ### Critical
 
@@ -262,13 +278,14 @@ _No risks._
 
 ### High
 
-**3 risks**
+**4 risks**
 
 | Severity | Risk | Category | Most relevant | Status |
 | --- | --- | --- | --- | --- |
 | High | [**Path-Traversal** risk at **creche Sink** against filesystem **Audit Archive** via **Write Archive**](#path-traversal) | [Path-Traversal](#path-traversal) | [creche Sink](#creche-sink), [Write Archive](#write-archive) | False Positive |
 | High | [**Path-Traversal** risk at **creche Verifier** against filesystem **Audit Evidence** via **Read Evidence**](#path-traversal) | [Path-Traversal](#path-traversal) | [creche Verifier](#creche-verifier), [Read Evidence](#read-evidence) | False Positive |
 | High | [**Prompt Injection** risk at **Coding Agent**](#prompt-injection) | [Prompt Injection](#prompt-injection) | [Coding Agent](#coding-agent), [Agent Pushes](#agent-pushes) | Unchecked |
+| High | [**VMM Impersonation** at **creche Sink** via **Hybrid Vsock**](#vmm-impersonation) | [VMM Impersonation](#vmm-impersonation) | [creche Sink](#creche-sink), [Hybrid Vsock](#hybrid-vsock) | Unchecked |
 
 ### Elevated
 
@@ -297,7 +314,7 @@ _No risks._
 
 ### Medium
 
-**24 risks**
+**25 risks**
 
 | Severity | Risk | Category | Most relevant | Status |
 | --- | --- | --- | --- | --- |
@@ -312,6 +329,7 @@ _No risks._
 | Medium | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **GitHub Releases** via **Publish Release**](#server-side-request-forgery-ssrf) | [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | [GitHub Actions](#github-actions), [Publish Release](#publish-release) | Mitigated |
 | Medium | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **GitHub Repository** via **Checkout**](#server-side-request-forgery-ssrf) | [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | [GitHub Actions](#github-actions), [Checkout](#checkout) | Mitigated |
 | Medium | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **Sigstore** via **Keyless Signing**](#server-side-request-forgery-ssrf) | [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | [GitHub Actions](#github-actions), [Keyless Signing](#keyless-signing) | Mitigated |
+| Medium | [**Sink Memory Exposure** at **creche Sink**](#sink-memory-exposure) | [Sink Memory Exposure](#sink-memory-exposure) | [creche Sink](#creche-sink) | Unchecked |
 | Medium | [**Unchecked Deployment** risk at **GitHub Actions**](#unchecked-deployment) | [Unchecked Deployment](#unchecked-deployment) | [GitHub Actions](#github-actions) | Mitigated |
 | Medium | [**Unchecked Deployment** risk at **Maintainer Workstation**](#unchecked-deployment) | [Unchecked Deployment](#unchecked-deployment) | [Maintainer Workstation](#maintainer-workstation) | Mitigated |
 | Medium | [**Unencrypted Technical Asset** named **Maintainer Workstation**](#unencrypted-technical-assets) | [Unencrypted Technical Assets](#unencrypted-technical-assets) | [Maintainer Workstation](#maintainer-workstation) | Unchecked |
@@ -435,6 +453,10 @@ Data-flow diagram of "creche". A box is an external entity, a stadium a process,
 
     A coding agent on the workstation, with the hk and mise MCP servers from .mcp.json
 
+- [creche Sink](#creche-sink)
+
+    Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
+
 - [Audit Archive](#audit-archive)
 
     The JSON lines file on the node
@@ -446,10 +468,6 @@ Data-flow diagram of "creche". A box is an external entity, a stadium a process,
 - [GitHub Releases](#github-releases)
 
     Release downloads of Pinguladora/creche
-
-- [creche Sink](#creche-sink)
-
-    Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
 
 - [GitHub Repository](#github-repository)
 
@@ -615,13 +633,17 @@ _This list is not complete and regulatory or law relevant abuse cases have to be
 
 ## STRIDE Classification of Identified Risks
 
-This chapter clusters and classifies the risks by STRIDE categories: in total **51 potential risks** have been identified during the threat modeling process.
+This chapter clusters and classifies the risks by STRIDE categories: in total **53 potential risks** have been identified during the threat modeling process.
 
 ### Spoofing
 
-**3 risks**
+**4 risks**
 
 Spoofing, against authenticity
+
+- **High**: [VMM Impersonation](#vmm-impersonation): 1/1 unmitigated Risk, exploitation likelihood is _Likely_ with _High_ impact
+
+    The sink admits a connection on a sandbox's clh.sock_P only from the process it takes for the sandbox's VMM. It finds that process by a listening socket whose bound path, as the peer's /proc/&lt;pid&gt;/net/unix lists it, resolves to the sandbox's clh.sock. That path is only the name the socket was bound under. Its binder can replace it with a symlink to any sandbox's clh.sock, or a hardlink when it owns that file, or bind under the same path in a mount namespace of its own.
 
 - **Elevated**: [Missing File Validation](#missing-file-validation): 2 mitigated Risks, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
@@ -673,7 +695,7 @@ Repudiation, against non-repudiability
 
 ### Information Disclosure
 
-**17 risks**
+**18 risks**
 
 Information disclosure, against confidentiality
 
@@ -696,6 +718,10 @@ Information disclosure, against confidentiality
 - **Medium**: [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf): 1/4 unmitigated Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
     When a server system (i.e. not a client) is accessing other server systems via typical web protocols Server-Side Request Forgery (SSRF) or Local-File-Inclusion (LFI) or Remote-File-Inclusion (RFI) risks might arise.
+
+- **Medium**: [Sink Memory Exposure](#sink-memory-exposure): 1/1 unmitigated Risk, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    The sink runs as root or as the VMM's user, and sets neither PR_SET_DUMPABLE nor a seccomp filter. When it shares the VMM's user, a process of that user, such as code that escaped a guest, may attach to it with ptrace or read its /proc/&lt;pid&gt;/mem, as far as the host's ptrace restrictions allow, and take the signing keys of the open streams.
 
 - **Medium**: [Unencrypted Technical Assets](#unencrypted-technical-assets): 3/5 unmitigated Risks, exploitation likelihood is _Unlikely_ with _High_ impact
 
@@ -755,7 +781,7 @@ Elevation of privilege, against authorization
 
 ## Assignment by Function
 
-This chapter clusters and assigns the risks by functions which are most likely able to check and mitigate them: in total **51 potential risks** have been identified during the threat modeling process.
+This chapter clusters and assigns the risks by functions which are most likely able to check and mitigate them: in total **53 potential risks** have been identified during the threat modeling process.
 
 ### Business Side
 
@@ -819,7 +845,7 @@ Architecture
 
 ### Development
 
-**10 risks**
+**12 risks**
 
 Development
 
@@ -830,6 +856,10 @@ Development
 - **High**: [Prompt Injection](#prompt-injection): 1/1 unmitigated Risk, exploitation likelihood is _Very Likely_ with _High_ impact
 
     Treat everything a model reads as untrusted, including retrieved documents and tool responses: keep instructions apart from data (for example with clearly delimited and labelled content), filter input and output, and give the model and its tools only the permissions the task needs. Require a human approval for actions with side effects, and monitor for injection attempts. See the OWASP GenAI Security Project at [https://genai.owasp.org/](https://genai.owasp.org/).
+
+- **High**: [VMM Impersonation](#vmm-impersonation): 1/1 unmitigated Risk, exploitation likelihood is _Likely_ with _High_ impact
+
+    Take the VMM's identity from the kernel instead of a path. A connection to clh.sock carries the credentials of the process listening on it. Pin that process by its pid and start time, and admit only it.
 
 - **Elevated**: [Missing File Validation](#missing-file-validation): 2 mitigated Risks, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
@@ -842,6 +872,10 @@ Development
 - **Medium**: [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf): 1/4 unmitigated Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
     Try to avoid constructing the outgoing target URL with caller controllable values. Alternatively use a mapping (whitelist) when accessing outgoing URLs instead of creating them including caller controllable values. When a third-party product is used instead of custom developed software, check if the product applies the proper mitigation and ensure a reasonable patch-level.
+
+- **Medium**: [Sink Memory Exposure](#sink-memory-exposure): 1/1 unmitigated Risk, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    Run the sink as another user than the VMM's, and have it mark itself not dumpable (PR_SET_DUMPABLE 0) when it starts, which keeps processes of the same user from attaching to it or reading its memory whatever the host's ptrace settings.
 
 - **Low**: [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf): 1/4 unmitigated Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
@@ -919,7 +953,7 @@ The following lists all technical assets sorted by their RAA value from highest 
 
     Where the maintainer works, with hk, mise and coding agents
 
-- [creche Sink](#creche-sink): RAA 24 %, highest severity still at risk: **Elevated**
+- [creche Sink](#creche-sink): RAA 24 %, highest severity still at risk: **High**
 
     Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
 
@@ -1058,7 +1092,7 @@ This chapter lists potential model failures where not all relevant assets have b
 
 ## Identified Risks by Vulnerability Category
 
-In total **51 potential risks** have been identified during the threat modeling process, distributed across **21 vulnerability categories**. The following sections describe each identified risk category and its risks.
+In total **53 potential risks** have been identified during the threat modeling process, distributed across **23 vulnerability categories**. The following sections describe each identified risk category and its risks.
 
 ### Prompt Injection
 
@@ -1109,6 +1143,55 @@ The risk **Prompt Injection** was found **1 time** in the analyzed architecture 
 | Severity | Risk | ID | Likelihood | Impact | Most relevant | Status | Tracking |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | High | **Prompt Injection** risk at **Coding Agent** | `prompt-injection@coding-agent` | Very Likely | High | [Coding Agent](#coding-agent), [Agent Pushes](#agent-pushes) | Unchecked | _not tracked_ |
+
+### VMM Impersonation
+
+**High**, 1/1 unmitigated Risk, `vmm-impersonation`
+
+| Property | Value |
+| --- | --- |
+| STRIDE | Spoofing |
+| CWE | [CWE 290](https://cwe.mitre.org/data/definitions/290.html) |
+| Function | Development |
+| Action | Kernel-Attested Peer Identity |
+| ASVS chapter | V8: Authorization |
+| Cheat sheet | [Authentication_Cheat_Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html) |
+
+#### Description
+
+The sink admits a connection on a sandbox's clh.sock_P only from the process it takes for the sandbox's VMM. It finds that process by a listening socket whose bound path, as the peer's /proc/&lt;pid&gt;/net/unix lists it, resolves to the sandbox's clh.sock. That path is only the name the socket was bound under. Its binder can replace it with a symlink to any sandbox's clh.sock, or a hardlink when it owns that file, or bind under the same path in a mount namespace of its own.
+
+#### Impact
+
+Any process running as the VMM's user, the VMM of another sandbox included, can inject events under any sandbox's id and pod on the node. That defeats the attestation of the sandbox (ADR 0009), so the audit trail of every sandbox on the node can be forged.
+
+#### Detection Logic
+
+A review of the sink's peer admission (peer::check), reproduced with a same-user process that bound a socket and replaced its name with a symlink to another sandbox's clh.sock.
+
+#### Risk Rating
+
+Likely once an attacker runs as the VMM's user, for example after a virtual machine escape, and the impact is high, as it forges the attributed events of every sandbox on the node.
+
+#### False Positives
+
+None while the admission resolves bound paths.
+
+#### Mitigation
+
+Take the VMM's identity from the kernel instead of a path. A connection to clh.sock carries the credentials of the process listening on it. Pin that process by its pid and start time, and admit only it.
+
+#### Check
+
+Is the VMM identified without reading a bound path back from /proc?
+
+#### Risk Findings
+
+The risk **VMM Impersonation** was found **1 time** in the analyzed architecture to be potentially possible. Each spot should be checked individually by reviewing the implementation whether all controls have been applied properly in order to mitigate each risk.
+
+| Severity | Risk | ID | Likelihood | Impact | Most relevant | Status | Tracking |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| High | **VMM Impersonation** at **creche Sink** via **Hybrid Vsock** | `vmm-impersonation@creche-sink@kata-vmm>hybrid-vsock` | Likely | High | [creche Sink](#creche-sink), [Hybrid Vsock](#hybrid-vsock) | Unchecked | _not tracked_ |
 
 ### Excessive Agency
 
@@ -1685,6 +1768,55 @@ The risk **Missing Multi-Factor Authentication (MFA)** was found **1 time** in t
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Medium | **Missing Multi-Factor Authentication** covering communication link **Push Branches** from **Maintainer Workstation** to **GitHub Repository** | `missing-authentication-second-factor@maintainer-workstation>push-branches@maintainer-workstation@github-repo` | Unlikely | Medium | [GitHub Repository](#github-repository), [Push Branches](#push-branches) | Unchecked | _not tracked_ |
 
+### Sink Memory Exposure
+
+**Medium**, 1/1 unmitigated Risk, `sink-memory-exposure`
+
+| Property | Value |
+| --- | --- |
+| STRIDE | Information Disclosure |
+| CWE | [CWE 668](https://cwe.mitre.org/data/definitions/668.html) |
+| Function | Development |
+| Action | Process Hardening |
+| ASVS chapter | V13: Configuration |
+| Cheat sheet | [PR_SET_DUMPABLE.2const](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html) |
+
+#### Description
+
+The sink runs as root or as the VMM's user, and sets neither PR_SET_DUMPABLE nor a seccomp filter. When it shares the VMM's user, a process of that user, such as code that escaped a guest, may attach to it with ptrace or read its /proc/&lt;pid&gt;/mem, as far as the host's ptrace restrictions allow, and take the signing keys of the open streams.
+
+#### Impact
+
+An attacker with the keys of the open streams can sign forged checkpoints for the node.
+
+#### Detection Logic
+
+A review of how the sink runs, while triaging the virtual machine escape of its host.
+
+#### Risk Rating
+
+Unlikely, as it needs a foothold as the VMM's user and a host that lets the same user ptrace. The impact is high, as the keys sign the audit trail.
+
+#### False Positives
+
+Sinks that run as root or as their own user, apart from the VMM's.
+
+#### Mitigation
+
+Run the sink as another user than the VMM's, and have it mark itself not dumpable (PR_SET_DUMPABLE 0) when it starts, which keeps processes of the same user from attaching to it or reading its memory whatever the host's ptrace settings.
+
+#### Check
+
+Does the sink run as another user than the VMM, or mark itself not dumpable?
+
+#### Risk Findings
+
+The risk **Sink Memory Exposure** was found **1 time** in the analyzed architecture to be potentially possible. Each spot should be checked individually by reviewing the implementation whether all controls have been applied properly in order to mitigate each risk.
+
+| Severity | Risk | ID | Likelihood | Impact | Most relevant | Status | Tracking |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Medium | **Sink Memory Exposure** at **creche Sink** | `sink-memory-exposure@creche-sink` | Unlikely | High | [creche Sink](#creche-sink) | Unchecked | _not tracked_ |
+
 ### Unencrypted Technical Assets
 
 **Medium**, 3/5 unmitigated Risks, `unencrypted-asset`
@@ -2156,7 +2288,7 @@ The risk **Wrong Communication Link Content** was found **2 times** in the analy
 
 ## Identified Risks by Technical Asset
 
-In total **51 potential risks** have been identified during the threat modeling process, distributed across **12 in-scope technical assets**. The RAA value of a technical asset is the calculated "Relative Attacker Attractiveness" value in percent.
+In total **53 potential risks** have been identified during the threat modeling process, distributed across **12 in-scope technical assets**. The RAA value of a technical asset is the calculated "Relative Attacker Attractiveness" value in percent.
 
 ### Coding Agent
 
@@ -2207,6 +2339,56 @@ A coding agent on the workstation, with the hk and mise MCP servers from .mcp.js
 | Integrity | critical |
 | Availability | operational |
 | CIA justification | Edits the code and runs tools |
+
+### creche Sink
+
+**High**, 4/7 unmitigated Risks, `creche-sink`
+
+Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
+
+#### Identified Risks of the Asset
+
+- **High**: [**VMM Impersonation** at **creche Sink** via **Hybrid Vsock**](#vmm-impersonation) (Unchecked)
+- **High**: [**Path-Traversal** risk at **creche Sink** against filesystem **Audit Archive** via **Write Archive**](#path-traversal) (False Positive)
+- **Elevated**: [**Tenant Resource Exhaustion** of **creche Sink** by tenants behind **Kata VMM** via **Hybrid Vsock**](#tenant-resource-exhaustion) (Unchecked)
+- **Elevated**: [**Untrusted Deserialization** risk at **creche Sink**](#untrusted-deserialization) (Mitigated)
+- **Elevated**: [**Path-Traversal** risk at **creche Sink** against filesystem **containerd Bundles** via **Read Bundle**](#path-traversal) (Mitigated)
+- **Medium**: [**Sink Memory Exposure** at **creche Sink**](#sink-memory-exposure) (Unchecked)
+- **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
+
+#### Asset Information
+
+| Property | Value |
+| --- | --- |
+| Type | process |
+| Usage | business |
+| RAA | 24 % |
+| Size | service |
+| Technology | monitoring |
+| Tags | none |
+| Trust boundary | [Node](#node) |
+| Internet | no |
+| Machine | virtual |
+| Encryption | none |
+| Multi-tenant | yes |
+| Redundant | no |
+| Custom-developed | yes |
+| Client used by a human | no |
+| Data formats accepted | Serialization |
+| Data processed | [Agent Labels](#agent-labels), [Audit Trail](#audit-trail), [Guest Events](#guest-events), [Pod Identity](#pod-identity), [Sink Signing Keys](#sink-signing-keys) |
+| Data stored | none |
+| Outgoing communication links | [Write Archive](#write-archive), [Workload API](#workload-api), [Read Bundle](#read-bundle), [OTLP Export](#otlp-export) |
+| Incoming communication links | [Hybrid Vsock](#hybrid-vsock) |
+
+#### Asset Rating
+
+| Property | Value |
+| --- | --- |
+| Owner | creche maintainers |
+| Confidentiality | strictly-confidential |
+| Integrity | mission-critical |
+| Availability | important |
+| CIA justification | Root or the VMM's user on every node, parses input from untrusted guests and holds the signing keys |
 
 ### Audit Archive
 
@@ -2347,54 +2529,6 @@ Release downloads of Pinguladora/creche
 | Integrity | mission-critical |
 | Availability | operational |
 | CIA justification | What the nodes and guest images install |
-
-### creche Sink
-
-**Elevated**, 2/5 unmitigated Risks, `creche-sink`
-
-Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
-
-#### Identified Risks of the Asset
-
-- **High**: [**Path-Traversal** risk at **creche Sink** against filesystem **Audit Archive** via **Write Archive**](#path-traversal) (False Positive)
-- **Elevated**: [**Tenant Resource Exhaustion** of **creche Sink** by tenants behind **Kata VMM** via **Hybrid Vsock**](#tenant-resource-exhaustion) (Unchecked)
-- **Elevated**: [**Untrusted Deserialization** risk at **creche Sink**](#untrusted-deserialization) (Mitigated)
-- **Elevated**: [**Path-Traversal** risk at **creche Sink** against filesystem **containerd Bundles** via **Read Bundle**](#path-traversal) (Mitigated)
-- **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
-
-#### Asset Information
-
-| Property | Value |
-| --- | --- |
-| Type | process |
-| Usage | business |
-| RAA | 24 % |
-| Size | service |
-| Technology | monitoring |
-| Tags | none |
-| Trust boundary | [Node](#node) |
-| Internet | no |
-| Machine | virtual |
-| Encryption | none |
-| Multi-tenant | yes |
-| Redundant | no |
-| Custom-developed | yes |
-| Client used by a human | no |
-| Data formats accepted | Serialization |
-| Data processed | [Agent Labels](#agent-labels), [Audit Trail](#audit-trail), [Guest Events](#guest-events), [Pod Identity](#pod-identity), [Sink Signing Keys](#sink-signing-keys) |
-| Data stored | none |
-| Outgoing communication links | [Write Archive](#write-archive), [Workload API](#workload-api), [Read Bundle](#read-bundle), [OTLP Export](#otlp-export) |
-| Incoming communication links | [Hybrid Vsock](#hybrid-vsock) |
-
-#### Asset Rating
-
-| Property | Value |
-| --- | --- |
-| Owner | creche maintainers |
-| Confidentiality | strictly-confidential |
-| Integrity | mission-critical |
-| Availability | important |
-| CIA justification | Root or the VMM's user on every node, parses input from untrusted guests and holds the signing keys |
 
 ### GitHub Repository
 
@@ -3219,11 +3353,11 @@ _The asset was defined as out-of-scope._
 
 ## Identified Data Breach Probabilities by Data Asset
 
-In total **51 potential risks** have been identified during the threat modeling process, distributed across **10 data assets**. The following sections describe the derived data breach probabilities grouped by data asset.
+In total **53 potential risks** have been identified during the threat modeling process, distributed across **10 data assets**. The following sections describe the derived data breach probabilities grouped by data asset.
 
 ### Agent Labels
 
-**Probable**, 3/5 unmitigated Risks, `agent-labels`
+**Probable**, 4/6 unmitigated Risks, `agent-labels`
 
 user.creche.agent extended attributes the agents set on their delegated cgroups
 
@@ -3246,15 +3380,16 @@ user.creche.agent extended attributes the agents set on their delegated cgroups
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 3 remaining risks:
+This data asset has data breach potential because of 4 remaining risks:
 
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
+- Possible, **Medium**: [**Sink Memory Exposure** at **creche Sink**](#sink-memory-exposure) (Unchecked)
 
 ### Audit Trail
 
-**Probable**, 8/12 unmitigated Risks, `audit-trail`
+**Probable**, 9/13 unmitigated Risks, `audit-trail`
 
 JSON lines with stream sequence numbers, hash chained checkpoints and their signatures
 
@@ -3277,12 +3412,13 @@ JSON lines with stream sequence numbers, hash chained checkpoints and their sign
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 8 remaining risks:
+This data asset has data breach potential because of 9 remaining risks:
 
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Security Backend**](#missing-cloud-hardening) (Accepted)
+- Possible, **Medium**: [**Sink Memory Exposure** at **creche Sink**](#sink-memory-exposure) (Unchecked)
 - Improbable, **Elevated**: [**Missing Hardening** risk at **Audit Archive**](#missing-hardening) (Accepted)
 - Improbable, **Elevated**: [**Missing Hardening** risk at **Audit Evidence**](#missing-hardening) (Accepted)
 - Improbable, **Medium**: [**Unencrypted Technical Asset** named **Audit Archive** missing end user individual encryption with data-with-end-user-individual-key](#unencrypted-technical-assets) (Accepted)
@@ -3354,7 +3490,7 @@ This data asset has data breach potential because of 7 remaining risks:
 
 ### Guest Events
 
-**Probable**, 3/5 unmitigated Risks, `guest-events`
+**Probable**, 4/6 unmitigated Risks, `guest-events`
 
 Process, connect and file write records from the guest, with command arguments, paths and destinations
 
@@ -3377,11 +3513,12 @@ Process, connect and file write records from the guest, with command arguments, 
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 3 remaining risks:
+This data asset has data breach potential because of 4 remaining risks:
 
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
+- Possible, **Medium**: [**Sink Memory Exposure** at **creche Sink**](#sink-memory-exposure) (Unchecked)
 
 ### Pod History
 
@@ -3417,7 +3554,7 @@ This data asset has data breach potential because of 4 remaining risks:
 
 ### Pod Identity
 
-**Probable**, 3/5 unmitigated Risks, `pod-identity`
+**Probable**, 4/6 unmitigated Risks, `pod-identity`
 
 Pod name, namespace and uid from the annotations in the sandbox's OCI spec
 
@@ -3440,11 +3577,12 @@ Pod name, namespace and uid from the annotations in the sandbox's OCI spec
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 3 remaining risks:
+This data asset has data breach potential because of 4 remaining risks:
 
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
+- Possible, **Medium**: [**Sink Memory Exposure** at **creche Sink**](#sink-memory-exposure) (Unchecked)
 
 ### Release Artifacts
 
@@ -3480,7 +3618,7 @@ This data asset has data breach potential because of 4 remaining risks:
 
 ### Sink Signing Keys
 
-**Probable**, 3/4 unmitigated Risks, `sink-keys`
+**Probable**, 4/5 unmitigated Risks, `sink-keys`
 
 The sink's X.509-SVID and the per stream P-256 keys that sign checkpoints
 
@@ -3503,11 +3641,12 @@ The sink's X.509-SVID and the per stream P-256 keys that sign checkpoints
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 3 remaining risks:
+This data asset has data breach potential because of 4 remaining risks:
 
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
 - Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
+- Possible, **Medium**: [**Sink Memory Exposure** at **creche Sink**](#sink-memory-exposure) (Unchecked)
 
 ### Source Code
 
@@ -4155,7 +4294,7 @@ Reads the exported lines, the trust bundle and the pod history named on its comm
 
 ## Risk Tracking
 
-**38 of 51 risks** are tracked in the model. The others are unchecked.
+**38 of 53 risks** are tracked in the model. The others are unchecked.
 
 | Risk | ID | Severity | Status | Date | Checked by | Ticket | Justification |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -4307,14 +4446,16 @@ The risk rules checked **6 of 10** entries of the [OWASP Non-Human Identities To
 | --- | --- |
 | Threagile version | 1.0.0 |
 | Threagile build timestamp |  |
-| Threagile execution timestamp | 20261115000954 |
+| Threagile execution timestamp | 20261115004047 |
 | Model filename | threagile.yaml |
-| Model hash (SHA256) | `7cced911ba084d63ae8fca0d7e28b35e91c3c7d88282763f0aef3cb84b0662e7` |
+| Model hash (SHA256) | `b6a79f1d66b7282d5350c499878e0066fcdcb8fc86866fbe9b99d6ccde857457` |
 
 Threagile (see [threagile.io](https://threagile.io) for more details) is an open-source toolkit for agile threat modeling, created by Christian Schneider ([christian-schneider.net](https://christian-schneider.net)): It allows to model an architecture with its assets in an agile fashion as a YAML file directly inside the IDE. Upon execution of the Threagile toolkit all standard risk rules (as well as individual custom rules if present) are checked against the architecture model. At the time the Threagile toolkit was executed on the model input file the following risk rules were checked:
 
 | Risk rule | ID | STRIDE | Description | Detection | Rating |
 | --- | --- | --- | --- | --- | --- |
+| Sink Memory Exposure (_Individual risk category_) | `sink-memory-exposure` | Information Disclosure | The sink runs as root or as the VMM's user, and sets neither PR_SET_DUMPABLE nor a seccomp filter. When it shares the VMM's user, a process of that user, such as code that escaped a guest, may attach to it with ptrace or read its /proc/&lt;pid&gt;/mem, as far as the host's ptrace restrictions allow, and take the signing keys of the open streams. | A review of how the sink runs, while triaging the virtual machine escape of its host. | Unlikely, as it needs a foothold as the VMM's user and a host that lets the same user ptrace. The impact is high, as the keys sign the audit trail. |
+| VMM Impersonation (_Individual risk category_) | `vmm-impersonation` | Spoofing | The sink admits a connection on a sandbox's clh.sock_P only from the process it takes for the sandbox's VMM. It finds that process by a listening socket whose bound path, as the peer's /proc/&lt;pid&gt;/net/unix lists it, resolves to the sandbox's clh.sock. That path is only the name the socket was bound under. Its binder can replace it with a symlink to any sandbox's clh.sock, or a hardlink when it owns that file, or bind under the same path in a mount namespace of its own. | A review of the sink's peer admission (peer::check), reproduced with a same-user process that bound a socket and replaced its name with a symlink to another sandbox's clh.sock. | Likely once an attacker runs as the VMM's user, for example after a virtual machine escape, and the impact is high, as it forges the attributed events of every sandbox on the node. |
 | Accidental Secret Leak | `accidental-secret-leak` | Information Disclosure | Sourcecode repositories (including their histories) as well as artifact registries can accidentally contain secrets like checked-in or packaged-in passwords, API tokens, certificates, crypto keys, etc. | In-scope sourcecode repositories and artifact registries. | The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed. |
 | Code Backdooring | `code-backdooring` | Tampering | For each build pipeline component Code Backdooring risks might arise where attackers compromise the build pipeline in order to let backdoored artifacts be shipped into production. Aside from direct code backdooring this includes backdooring of dependencies and even of more lower-level build infrastructure, like backdooring compilers (similar to what the XcodeGhost malware did) or dependencies. | In-scope development relevant technical assets which are either accessed by out-of-scope unmanaged developer clients and/or are directly accessed by any kind of internet-located (non-VPN) component or are themselves directly located on the internet. | The risk rating depends on the confidentiality and integrity rating of the code being handled and deployed as well as the placement/calling of this technical asset on/from the internet. |
 | Confused Deputy Agent | `confused-deputy-agent` | Elevation of Privilege | An AI agent that acts for its users but reaches data and tools with an identity of its own, a service account or a workload, can do for any user what the agent may do for all of them. The targets check the agent, not the user, so whatever a user asks for, or a prompt injection makes the agent ask for, is allowed. | In-scope ai-agent technical assets that act for users, through an incoming communication link with the identity _end-user_ or from a caller used by humans (other than devops links), and reach a technical asset (other than an llm) processing or storing data rated at least as confidential or critical with the identity _service-account_ or _workload_, either directly or through the tools of an mcp-server technical asset. | The risk rating depends on the sensitivity of the most sensitive technical asset the agent reaches with its own identity. The attack is likely when the agent takes untrusted input, and unlikely otherwise. |
@@ -4427,4 +4568,4 @@ In this particular project, a time box approach was used to define the analysis 
 
 Distribution of this report (in full or in part like diagrams or risk findings) requires that this disclaimer as well as the chapter about the Threagile toolkit and method used is kept intact as part of the distributed report or referenced from the distributed parts.
 
-_Generated by Threagile 1.0.0 on 2026-11-15T00:09:54+01:00._
+_Generated by Threagile 1.0.0 on 2026-11-15T00:40:47+01:00._
