@@ -2,42 +2,45 @@
 //!
 //! Cloud Hypervisor connects to `clh.sock_P` when its guest connects to vsock
 //! port P. So the only process that ever needs to connect is the sandbox's VMM,
-//! the process holding the listening vsock socket `clh.sock`. The guest cannot
-//! choose which socket its connection arrives on, and other host processes are
-//! refused here, so the sandbox id of an accepted connection is a fact the
-//! host attests, not something the guest or a neighbour claims.
+//! the process listening on the vsock socket `clh.sock`. The guest cannot choose
+//! which socket its connection arrives on, and other host processes are refused
+//! here, so the sandbox id of an accepted connection is a fact the host attests,
+//! not something the guest or a neighbour claims.
 //!
-//! The checks read `/proc/<pid>/fd` of the peer, which needs the same user as
-//! the VMM or root. Root on the host is trusted: it could ptrace the VMM anyway.
+//! The kernel names the VMM: a connection to `clh.sock` carries the credentials
+//! of the process that listens on it. No path is read back from `/proc`. A path
+//! there is only the name a socket was bound under, and its binder can make that
+//! name lead to any other socket with a link, or bind it in a mount namespace of
+//! its own. The VMM is pinned by its pid and its start time, so a process that
+//! later reuses its pid is not taken for it. Reading the start time needs only
+//! `/proc/<pid>/stat`. Root on the host is trusted: it could ptrace the VMM
+//! anyway.
 
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
-/// `__SO_ACCEPTCON` in the flags column of `/proc/net/unix`: a listening socket.
-const ACCEPTING: u32 = 0x0001_0000;
+use tokio::net::UnixStream;
 
 /// Why a connection was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The kernel did not report the peer's pid.
     NoPid,
-    /// The peer runs as another user than the one owning the vsock socket.
+    /// The peer runs as another user than the VMM.
     Uid {
         /// The peer's user id.
         peer: u32,
-        /// The owner of `clh.sock`.
+        /// The VMM's user id.
         owner: u32,
     },
-    /// The peer does not hold the sandbox's listening vsock socket.
+    /// The peer is not the process listening on the sandbox's vsock socket.
     NotVmm {
         /// The peer's pid.
         pid: i32,
     },
-    /// The peer or the socket could not be inspected.
+    /// The peer could not be inspected.
     Io(io::ErrorKind),
 }
 
@@ -58,153 +61,187 @@ impl From<io::Error> for Refusal {
     }
 }
 
-/// Accepts a peer with `pid` and `uid` only when it is the VMM serving the
-/// listening vsock socket at `vsock`. Blocking: it reads `/proc`.
+/// The process listening on a sandbox's vsock socket: its VMM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Vmm {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+    /// When the process started, in clock ticks since boot.
+    start: u64,
+}
+
+impl Vmm {
+    /// Asks the kernel who listens on `vsock`, by connecting to it and reading
+    /// the credentials the connection carries. The connection is closed without
+    /// sending anything, which the VMM sees as a peer that went away.
+    ///
+    /// # Errors
+    ///
+    /// When nothing listens on `vsock` yet, or the listener cannot be inspected.
+    pub async fn probe(vsock: &Path) -> io::Result<Self> {
+        let cred = UnixStream::connect(vsock).await?.peer_cred()?;
+        let pid = cred
+            .pid()
+            .filter(|&pid| pid > 0)
+            .ok_or_else(|| io::Error::other("the listener's pid is unknown"))?;
+        Ok(Self {
+            pid,
+            uid: cred.uid(),
+            gid: cred.gid(),
+            start: start_time(Path::new("/proc"), pid)?,
+        })
+    }
+
+    /// The VMM's user id.
+    #[must_use]
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// The VMM's group id.
+    #[must_use]
+    pub const fn gid(&self) -> u32 {
+        self.gid
+    }
+}
+
+#[cfg(test)]
+impl Vmm {
+    /// Another process standing in as a VMM run by `uid`: init.
+    pub(crate) fn init(uid: u32) -> Self {
+        Self {
+            pid: 1,
+            uid,
+            gid: 0,
+            start: start_time(Path::new("/proc"), 1).unwrap(),
+        }
+    }
+}
+
+/// Accepts a peer with `pid` and `uid` only when it is `vmm`. Blocking: it reads
+/// `/proc`.
 ///
 /// # Errors
 ///
 /// The reason the peer is refused.
-pub fn check(pid: Option<i32>, uid: u32, vsock: &Path) -> Result<(), Refusal> {
-    let pid = pid.ok_or(Refusal::NoPid)?;
-    let socket = fs::symlink_metadata(vsock)?;
-    if uid != socket.uid() {
+pub fn check(pid: Option<i32>, uid: u32, vmm: &Vmm) -> Result<(), Refusal> {
+    let pid = pid.filter(|&pid| pid > 0).ok_or(Refusal::NoPid)?;
+    if uid != vmm.uid {
         return Err(Refusal::Uid {
             peer: uid,
-            owner: socket.uid(),
+            owner: vmm.uid,
         });
     }
-    if holds_listener(Path::new("/proc"), pid, (socket.dev(), socket.ino()))? {
+    if pid == vmm.pid && start_time(Path::new("/proc"), pid)? == vmm.start {
         Ok(())
     } else {
         Err(Refusal::NotVmm { pid })
     }
 }
 
-/// Whether `pid` has an open listening unix socket bound to the file `file`,
-/// given as (device, inode). The peer's own `net/unix` is read because the VMM
-/// may run in another network namespace.
-fn holds_listener(proc: &Path, pid: i32, file: (u64, u64)) -> io::Result<bool> {
-    let dir = proc.join(pid.to_string());
-    let table = fs::read(dir.join("net/unix"))?;
-    let sockets: Vec<u64> = table
-        .split(|&b| b == b'\n')
-        .filter_map(|line| listener(std::str::from_utf8(line).ok()?))
-        .filter(|(_, path)| fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == file))
-        .map(|(inode, _)| inode)
-        .collect();
-    if sockets.is_empty() {
-        return Ok(false);
-    }
-    for entry in fs::read_dir(dir.join("fd"))? {
-        // An fd may close while the directory is read.
-        let Ok(target) = entry.and_then(|e| fs::read_link(e.path())) else {
-            continue;
-        };
-        if socket_inode(target.as_os_str()).is_some_and(|inode| sockets.contains(&inode)) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// The socket inode and bound path of a listening socket's line in
-/// `/proc/net/unix`: `Num RefCount Protocol Flags Type St Inode Path`, with the
-/// inode right-aligned and the path running to the end of the line.
-fn listener(line: &str) -> Option<(u64, &str)> {
-    let mut rest = line;
-    let mut fields = [""; 7];
-    for field in &mut fields {
-        rest = rest.trim_start_matches(' ');
-        let end = rest.find(' ').unwrap_or(rest.len());
-        (*field, rest) = rest.split_at_checked(end)?;
-    }
-    let [_, _, _, flags, _, _, inode] = fields;
-    let path = rest.strip_prefix(' ').filter(|p| p.starts_with('/'))?;
-    let listening = u32::from_str_radix(flags, 16).ok()? & ACCEPTING != 0;
-    listening.then_some((inode.parse().ok()?, path))
-}
-
-/// The inode in an fd link of the form `socket:[N]`.
-fn socket_inode(link: &OsStr) -> Option<u64> {
-    link.to_str()?
-        .strip_prefix("socket:[")?
-        .strip_suffix(']')?
-        .parse()
-        .ok()
+/// When `pid` started, from field 22 of `/proc/<pid>/stat`. The fields are
+/// counted after the command name, which is in parentheses and may hold spaces
+/// and parentheses itself.
+fn start_time(proc: &Path, pid: i32) -> io::Result<u64> {
+    let stat = fs::read_to_string(proc.join(pid.to_string()).join("stat"))?;
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_ascii_whitespace().nth(19)?.parse().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed stat"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::net::UnixListener;
 
-    #[test]
-    fn listeners_are_parsed_from_proc_net_unix() {
-        let line =
-            "0000000000000000: 00000002 00000000 00010000 0001 01  4242 /run/vc/vm/ab/clh.sock";
-        assert_eq!(listener(line), Some((4242, "/run/vc/vm/ab/clh.sock")));
-        // Paths keep their spaces.
-        let line = "0000000000000000: 00000002 00000000 00010000 0001 01 7 /tmp/a b";
-        assert_eq!(listener(line), Some((7, "/tmp/a b")));
-        for line in [
-            // Connected, not listening.
-            "0000000000000000: 00000003 00000000 00000000 0001 03 4242 /run/vc/vm/ab/clh.sock",
-            // Abstract and unbound sockets have no file.
-            "0000000000000000: 00000002 00000000 00010000 0001 01 4242 @abstract",
-            "0000000000000000: 00000002 00000000 00010000 0001 01 4242",
-            "Num       RefCount Protocol Flags    Type St Inode Path",
-            "",
-        ] {
-            assert_eq!(listener(line), None, "{line}");
-        }
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
     #[test]
-    fn socket_links_carry_their_inode() {
-        assert_eq!(socket_inode(OsStr::new("socket:[123]")), Some(123));
-        assert_eq!(socket_inode(OsStr::new("pipe:[123]")), None);
-        assert_eq!(socket_inode(OsStr::new("socket:[12")), None);
-        assert_eq!(socket_inode(OsStr::new("/dev/null")), None);
+    fn the_vmm_is_the_process_the_kernel_reports_listening() {
+        runtime().block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let vsock = tmp.path().join("clh.sock");
+            let uid = fs::metadata(tmp.path()).unwrap().uid();
+            let pid = i32::try_from(std::process::id()).unwrap();
+
+            // A plain file, or nobody listening: no VMM yet.
+            fs::write(&vsock, b"").unwrap();
+            assert!(Vmm::probe(&vsock).await.is_err());
+            fs::remove_file(&vsock).unwrap();
+            assert!(Vmm::probe(&vsock).await.is_err());
+
+            // This process listens on it, as Cloud Hypervisor does.
+            let listener = UnixListener::bind(&vsock).unwrap();
+            let vmm = Vmm::probe(&vsock).await.unwrap();
+            assert_eq!((vmm.pid, vmm.uid), (pid, uid));
+            assert_eq!(check(Some(pid), uid, &vmm), Ok(()));
+            assert_eq!(check(None, uid, &vmm), Err(Refusal::NoPid));
+            assert_eq!(check(Some(0), uid, &vmm), Err(Refusal::NoPid));
+            assert_eq!(
+                check(Some(pid), uid + 1, &vmm),
+                Err(Refusal::Uid {
+                    peer: uid + 1,
+                    owner: uid
+                })
+            );
+            // Any other process is not the VMM, whatever it listens on.
+            assert_eq!(check(Some(1), uid, &vmm), Err(Refusal::NotVmm { pid: 1 }));
+            // Nor is a process that reuses the VMM's pid later.
+            let reused = Vmm {
+                start: vmm.start + 1,
+                ..vmm
+            };
+            assert_eq!(check(Some(pid), uid, &reused), Err(Refusal::NotVmm { pid }));
+            drop(listener);
+        });
     }
 
     #[test]
-    fn only_the_process_holding_the_vsock_socket_is_the_vmm() {
+    fn a_link_to_the_vsock_socket_reaches_the_same_listener() {
+        runtime().block_on(async {
+            // A peer may bind its own socket and then make its name lead to the
+            // sandbox's vsock socket. The probe asks who listens on the vsock
+            // socket itself, so such a name changes nothing.
+            let tmp = tempfile::tempdir().unwrap();
+            let vsock = tmp.path().join("clh.sock");
+            let _vmm = UnixListener::bind(&vsock).unwrap();
+            let decoy = tmp.path().join("decoy.sock");
+            let _decoy = UnixListener::bind(&decoy).unwrap();
+            fs::remove_file(&decoy).unwrap();
+            std::os::unix::fs::symlink(&vsock, &decoy).unwrap();
+            assert_eq!(
+                Vmm::probe(&decoy).await.unwrap(),
+                Vmm::probe(&vsock).await.unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn start_times_are_read_after_the_command_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let vsock = tmp.path().join("clh.sock");
-        let uid = fs::metadata(tmp.path()).unwrap().uid();
-        let pid = i32::try_from(std::process::id()).unwrap();
-
-        // A plain file: nobody serves this sandbox.
-        fs::write(&vsock, b"").unwrap();
-        assert_eq!(check(Some(pid), uid, &vsock), Err(Refusal::NotVmm { pid }));
-        fs::remove_file(&vsock).unwrap();
-
-        // This process listens on it, as Cloud Hypervisor does.
-        let listener = UnixListener::bind(&vsock).unwrap();
-        assert_eq!(check(Some(pid), uid, &vsock), Ok(()));
-        assert_eq!(check(None, uid, &vsock), Err(Refusal::NoPid));
+        let dir = tmp.path().join("42");
+        fs::create_dir(&dir).unwrap();
+        // The command name may hold spaces and parentheses.
+        let fields: Vec<String> = (3..=22).map(|n| n.to_string()).collect();
+        fs::write(
+            dir.join("stat"),
+            format!("42 (a) b (c) {} 23 24\n", fields.join(" ")),
+        )
+        .unwrap();
+        assert_eq!(start_time(tmp.path(), 42).unwrap(), 22);
+        fs::write(dir.join("stat"), "42 (a) S 1\n").unwrap();
         assert_eq!(
-            check(Some(pid), uid + 1, &vsock),
-            Err(Refusal::Uid {
-                peer: uid + 1,
-                owner: uid
-            })
+            start_time(tmp.path(), 42).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
         );
-
-        // Holding a connection to it is not enough, only the listener counts.
-        let _client = UnixStream::connect(&vsock).unwrap();
-        drop(listener);
-        assert_eq!(check(Some(pid), uid, &vsock), Err(Refusal::NotVmm { pid }));
-
-        // Another socket file at the same path is another sandbox.
-        fs::remove_file(&vsock).unwrap();
-        let _other = UnixListener::bind(tmp.path().join("other.sock")).unwrap();
-        fs::write(&vsock, b"").unwrap();
-        assert_eq!(check(Some(pid), uid, &vsock), Err(Refusal::NotVmm { pid }));
-        assert_eq!(
-            check(Some(pid), uid, &tmp.path().join("gone")),
-            Err(Refusal::Io(io::ErrorKind::NotFound))
-        );
+        assert!(start_time(tmp.path(), 43).is_err());
     }
 
     #[test]

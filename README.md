@@ -49,8 +49,9 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
 - **Whole records only.** The forwarding queue is bounded and never splits a record
   across connections. Heartbeats report drops so silence can be told from blindness.
 - **The host attests the sandbox.** Each sandbox's socket is mode 0600, owned by
-  its VMM's user, and the sink accepts only the process holding that sandbox's
-  listening vsock socket, checked through the peer's credentials and `/proc`.
+  its VMM's user, and the sink accepts only the process listening on that
+  sandbox's vsock socket, as the kernel reports it for a connection to it, pinned
+  by its pid and start time.
   The sandbox id on every line comes from the host, never from the guest. What
   the guest reports inside the stream is the guest's claim. Sandbox ids must be
   containerd identifiers, and each sandbox gets at most 4 connections.
