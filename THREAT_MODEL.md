@@ -41,20 +41,20 @@ Threagile toolkit was used to model the architecture of "creche" and derive risk
 
 Each risk finding references a chapter of the OWASP ASVS (Application Security Verification Standard) audit checklist. The OWASP ASVS checklist should be considered as an inspiration by architects and developers to further harden the application in a Defense-in-Depth approach. Additionally, for each risk finding a link towards a matching OWASP Cheat Sheet or similar with technical details about how to implement a mitigation is given.
 
-In total **50 initial risks** in **21 categories** have been identified during the threat modeling process:
+In total **51 initial risks** in **21 categories** have been identified during the threat modeling process:
 
 | Severity | Risks | Status | Risks |
 | --- | ---: | --- | ---: |
-| Critical | 0 | Unchecked | 10 |
+| Critical | 0 | Unchecked | 13 |
 | High | 3 | In Discussion | 0 |
 | Elevated | 18 | Accepted | 15 |
-| Medium | 23 | In Progress | 0 |
-| Low | 6 | Mitigated | 17 |
+| Medium | 24 | In Progress | 0 |
+| Low | 6 | Mitigated | 15 |
 |  |  | False Positive | 8 |
 
 ## Impact Analysis of the Initial Risks
 
-The most prevalent impacts of the **50 initial risks** (distributed over **21 risk categories**) are (taking the severity ratings into account and using the highest for each category):
+The most prevalent impacts of the **51 initial risks** (distributed over **21 risk categories**) are (taking the severity ratings into account and using the highest for each category):
 
 - **High**: [Path-Traversal](#path-traversal): 3 Initial Risks, exploitation likelihood is _Very Likely_ with _High_ impact
 
@@ -76,10 +76,6 @@ The most prevalent impacts of the **50 initial risks** (distributed over **21 ri
 
     If this risk is unmitigated, attacks through the model or the agent, and its own mistakes, might go on unnoticed, and their effects could not be traced.
 
-- **Elevated**: [Missing Authentication](#missing-authentication): 1 Initial Risk, exploitation likelihood is _Likely_ with _High_ impact
-
-    If this risk is unmitigated, attackers might be able to access or modify sensitive data in an unauthenticated way.
-
 - **Elevated**: [Missing Cloud Hardening](#missing-cloud-hardening): 3 Initial Risks, exploitation likelihood is _Unlikely_ with _Very High_ impact
 
     If this risk is unmitigated, attackers might access cloud components in an unintended way.
@@ -99,6 +95,10 @@ The most prevalent impacts of the **50 initial risks** (distributed over **21 ri
 - **Elevated**: [Sensitive Data Disclosure through Model Output](#sensitive-data-disclosure-through-model-output): 1 Initial Risk, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
     If this risk is unmitigated, attackers might extract confidential data, other users' data or the system prompt through crafted questions.
+
+- **Elevated**: [Tenant Resource Exhaustion](#tenant-resource-exhaustion): 1 Initial Risk, exploitation likelihood is _Likely_ with _Medium_ impact
+
+    If this risk is unmitigated, one tenant might deny the service to the others, or make the asset lose their data, such as the audit records that would show what that tenant did.
 
 - **Elevated**: [Unguarded Access From Internet](#unguarded-access-from-internet): 6 Initial Risks, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
@@ -124,10 +124,6 @@ The most prevalent impacts of the **50 initial risks** (distributed over **21 ri
 
     If this risk is unmitigated, attackers might be able to access or modify highly sensitive data without strong authentication.
 
-- **Medium**: [Missing Vault (Secret Storage)](#missing-vault-secret-storage): 1 Initial Risk, exploitation likelihood is _Unlikely_ with _Medium_ impact
-
-    If this risk is unmitigated, attackers might be able to easier steal config secrets (like credentials, private keys, client certificates, etc.) once a vulnerability to access files is present and exploited.
-
 - **Medium**: [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf): 4 Initial Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
     If this risk is unmitigated, attackers might be able to access sensitive services or files of network-reachable components by modifying outgoing calls of affected components.
@@ -143,6 +139,10 @@ The most prevalent impacts of the **50 initial risks** (distributed over **21 ri
 - **Medium**: [Unguarded Access From Internet](#unguarded-access-from-internet): 6 Initial Risks, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
     If this risk is unmitigated, attackers might be able to directly attack sensitive systems without any hardening components in-between due to them being directly exposed on the internet.
+
+- **Medium**: [Virtual Machine Escape](#virtual-machine-escape): 2 Initial Risks, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    If this risk is unmitigated, attackers who control a guest, or the code it runs, might take over the host and from there every other virtual machine on it and the services the host runs.
 
 - **Low**: [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf): 4 Initial Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
@@ -164,23 +164,23 @@ The following table gives a high-level overview of the risk tracking status (inc
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Critical | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | High | 3 | 1 | 0 | 0 | 0 | 0 | 2 |
-| Elevated | 18 | 4 | 0 | 7 | 0 | 5 | 2 |
-| Medium | 23 | 4 | 0 | 7 | 0 | 10 | 2 |
+| Elevated | 18 | 5 | 0 | 7 | 0 | 4 | 2 |
+| Medium | 24 | 6 | 0 | 7 | 0 | 9 | 2 |
 | Low | 6 | 1 | 0 | 1 | 0 | 2 | 2 |
 
-After removal of risks with status _mitigated_ and _false positive_ the following **25 remain unmitigated**:
+After removal of risks with status _mitigated_ and _false positive_ the following **28 remain unmitigated**:
 
 | Severity | Unmitigated risks | To be checked by | Unmitigated risks |
 | --- | ---: | --- | ---: |
 | Critical | 0 | Business Side | 1 |
-| High | 1 | Architecture | 11 |
-| Elevated | 11 | Development | 2 |
-| Medium | 11 | Operations | 11 |
+| High | 1 | Architecture | 12 |
+| Elevated | 12 | Development | 2 |
+| Medium | 13 | Operations | 13 |
 | Low | 2 |  |  |
 
 ## Impact Analysis of the Remaining Risks
 
-The most prevalent impacts of the **25 remaining risks** (distributed over **14 risk categories**) are (taking the severity ratings into account and using the highest for each category):
+The most prevalent impacts of the **28 remaining risks** (distributed over **16 risk categories**) are (taking the severity ratings into account and using the highest for each category):
 
 - **High**: [Prompt Injection](#prompt-injection): 1 Remaining Risk, exploitation likelihood is _Very Likely_ with _High_ impact
 
@@ -210,6 +210,10 @@ The most prevalent impacts of the **25 remaining risks** (distributed over **14 
 
     If this risk is unmitigated, attackers might extract confidential data, other users' data or the system prompt through crafted questions.
 
+- **Elevated**: [Tenant Resource Exhaustion](#tenant-resource-exhaustion): 1 Remaining Risk, exploitation likelihood is _Likely_ with _Medium_ impact
+
+    If this risk is unmitigated, one tenant might deny the service to the others, or make the asset lose their data, such as the audit records that would show what that tenant did.
+
 - **Elevated**: [Unguarded Access From Internet](#unguarded-access-from-internet): 6 Remaining Risks, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
     If this risk is unmitigated, attackers might be able to directly attack sensitive systems without any hardening components in-between due to them being directly exposed on the internet.
@@ -234,6 +238,10 @@ The most prevalent impacts of the **25 remaining risks** (distributed over **14 
 
     If this risk is unmitigated, attackers might be able to directly attack sensitive systems without any hardening components in-between due to them being directly exposed on the internet.
 
+- **Medium**: [Virtual Machine Escape](#virtual-machine-escape): 2 Remaining Risks, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    If this risk is unmitigated, attackers who control a guest, or the code it runs, might take over the host and from there every other virtual machine on it and the services the host runs.
+
 - **Low**: [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf): 1 Remaining Risk, exploitation likelihood is _Unlikely_ with _Low_ impact
 
     If this risk is unmitigated, attackers might be able to access sensitive services or files of network-reachable components by modifying outgoing calls of affected components.
@@ -244,7 +252,7 @@ The most prevalent impacts of the **25 remaining risks** (distributed over **14 
 
 ## Risks by Severity
 
-All **50 risks** by severity, with their tracking status. Each risk links to its details in the chapter of its category.
+All **51 risks** by severity, with their tracking status. Each risk links to its details in the chapter of its category.
 
 ### Critical
 
@@ -271,7 +279,6 @@ _No risks._
 | Elevated | [**Excessive Agency** risk at **Coding Agent** changing **GitHub Repository**](#excessive-agency) | [Excessive Agency](#excessive-agency) | [Coding Agent](#coding-agent), [Agent Pushes](#agent-pushes) | Unchecked |
 | Elevated | [**Missing AI Guardrail** risk at **Coding Agent**](#missing-ai-guardrail) | [Missing AI Guardrail](#missing-ai-guardrail) | [Coding Agent](#coding-agent), [Agent Pushes](#agent-pushes) | Unchecked |
 | Elevated | [**Missing AI Monitoring** risk at **Coding Agent**](#missing-ai-monitoring) | [Missing AI Monitoring](#missing-ai-monitoring) | [Coding Agent](#coding-agent) | Unchecked |
-| Elevated | [**Missing Authentication** covering communication link **Download Release** from **Image Builder** to **GitHub Releases**](#missing-authentication) | [Missing Authentication](#missing-authentication) | [GitHub Releases](#github-releases), [Download Release](#download-release) | Mitigated |
 | Elevated | [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) | [Missing Cloud Hardening](#missing-cloud-hardening) | none | Accepted |
 | Elevated | [**Missing Cloud Hardening** risk at **GitHub**](#missing-cloud-hardening) | [Missing Cloud Hardening](#missing-cloud-hardening) | none | Accepted |
 | Elevated | [**Missing Cloud Hardening** risk at **Security Backend**](#missing-cloud-hardening) | [Missing Cloud Hardening](#missing-cloud-hardening) | none | Accepted |
@@ -282,6 +289,7 @@ _No risks._
 | Elevated | [**Missing Hardening** risk at **GitHub Actions**](#missing-hardening) | [Missing Hardening](#missing-hardening) | [GitHub Actions](#github-actions) | Mitigated |
 | Elevated | [**Sensitive Data Disclosure through Model Output** risk at **Coding Agent**](#sensitive-data-disclosure-through-model-output) | [Sensitive Data Disclosure through Model Output](#sensitive-data-disclosure-through-model-output) | [Coding Agent](#coding-agent) | Unchecked |
 | Elevated | [**Path-Traversal** risk at **creche Sink** against filesystem **containerd Bundles** via **Read Bundle**](#path-traversal) | [Path-Traversal](#path-traversal) | [creche Sink](#creche-sink), [Read Bundle](#read-bundle) | Mitigated |
+| Elevated | [**Tenant Resource Exhaustion** of **creche Sink** by tenants behind **Kata VMM** via **Hybrid Vsock**](#tenant-resource-exhaustion) | [Tenant Resource Exhaustion](#tenant-resource-exhaustion) | [creche Sink](#creche-sink), [Hybrid Vsock](#hybrid-vsock) | Unchecked |
 | Elevated | [**Unguarded Access from Internet** of **GitHub Releases** by **GitHub Actions** via **Publish Release**](#unguarded-access-from-internet) | [Unguarded Access From Internet](#unguarded-access-from-internet) | [GitHub Releases](#github-releases), [Publish Release](#publish-release) | Accepted |
 | Elevated | [**Unguarded Access from Internet** of **GitHub Releases** by **Image Builder** via **Download Release**](#unguarded-access-from-internet) | [Unguarded Access From Internet](#unguarded-access-from-internet) | [GitHub Releases](#github-releases), [Download Release](#download-release) | Accepted |
 | Elevated | [**Untrusted Deserialization** risk at **creche Sink**](#untrusted-deserialization) | [Untrusted Deserialization](#untrusted-deserialization) | [creche Sink](#creche-sink) | Mitigated |
@@ -289,7 +297,7 @@ _No risks._
 
 ### Medium
 
-**23 risks**
+**24 risks**
 
 | Severity | Risk | Category | Most relevant | Status |
 | --- | --- | --- | --- | --- |
@@ -301,7 +309,6 @@ _No risks._
 | Medium | [**Code Backdooring** risk at **GitHub Releases**](#code-backdooring) | [Code Backdooring](#code-backdooring) | [GitHub Releases](#github-releases) | Mitigated |
 | Medium | [**Missing Multi-Factor Authentication** covering communication link **Push Branches** from **Maintainer Workstation** to **GitHub Repository**](#missing-multi-factor-authentication-mfa) | [Missing Multi-Factor Authentication (MFA)](#missing-multi-factor-authentication-mfa) | [GitHub Repository](#github-repository), [Push Branches](#push-branches) | Unchecked |
 | Medium | [**Missing Identity Store** in the threat model (referencing asset **Evidence Export** as an example)](#missing-identity-store) | [Missing Identity Store](#missing-identity-store) | [Evidence Export](#evidence-export) | Accepted |
-| Medium | [**Missing Vault (Secret Storage)** in the threat model (referencing asset **creche Sink** as an example)](#missing-vault-secret-storage) | [Missing Vault (Secret Storage)](#missing-vault-secret-storage) | [creche Sink](#creche-sink) | Mitigated |
 | Medium | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **GitHub Releases** via **Publish Release**](#server-side-request-forgery-ssrf) | [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | [GitHub Actions](#github-actions), [Publish Release](#publish-release) | Mitigated |
 | Medium | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **GitHub Repository** via **Checkout**](#server-side-request-forgery-ssrf) | [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | [GitHub Actions](#github-actions), [Checkout](#checkout) | Mitigated |
 | Medium | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **Sigstore** via **Keyless Signing**](#server-side-request-forgery-ssrf) | [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | [GitHub Actions](#github-actions), [Keyless Signing](#keyless-signing) | Mitigated |
@@ -316,6 +323,8 @@ _No risks._
 | Medium | [**Unguarded Access from Internet** of **GitHub Repository** by **GitHub Actions** via **Checkout**](#unguarded-access-from-internet) | [Unguarded Access From Internet](#unguarded-access-from-internet) | [GitHub Repository](#github-repository), [Checkout](#checkout) | Accepted |
 | Medium | [**Unguarded Access from Internet** of **GitHub Repository** by **Maintainer Workstation** via **Push Branches**](#unguarded-access-from-internet) | [Unguarded Access From Internet](#unguarded-access-from-internet) | [GitHub Repository](#github-repository), [Push Branches](#push-branches) | Accepted |
 | Medium | [**Unguarded Access from Internet** of **GitHub Repository** by **Renovate** via **Update PRs**](#unguarded-access-from-internet) | [Unguarded Access From Internet](#unguarded-access-from-internet) | [GitHub Repository](#github-repository), [Update PRs](#update-prs) | Accepted |
+| Medium | [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) | [Virtual Machine Escape](#virtual-machine-escape) | [Audit Archive](#audit-archive) | Unchecked |
+| Medium | [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) | [Virtual Machine Escape](#virtual-machine-escape) | [creche Sink](#creche-sink) | Unchecked |
 
 ### Low
 
@@ -438,6 +447,10 @@ Data-flow diagram of "creche". A box is an external entity, a stadium a process,
 
     Release downloads of Pinguladora/creche
 
+- [creche Sink](#creche-sink)
+
+    Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
+
 - [GitHub Repository](#github-repository)
 
     Pinguladora/creche
@@ -445,10 +458,6 @@ Data-flow diagram of "creche". A box is an external entity, a stadium a process,
 - [Maintainer Workstation](#maintainer-workstation)
 
     Where the maintainer works, with hk, mise and coding agents
-
-- [Evidence Export](#evidence-export) (out of scope)
-
-    The auditor's own tools that export the stream lines from the central store and the pod history from the cluster, such as the store's client and kubectl
 
 - [Image Builder](#image-builder) (out of scope)
 
@@ -466,10 +475,6 @@ Data-flow diagram of "creche". A box is an external entity, a stadium a process,
 
     Loads the BPF programs with aya, drains the ring buffer and forwards whole records over vsock, started by systemd before kata-agent
 
-- [creche Sink](#creche-sink)
-
-    Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
-
 - [creche Verifier](#creche-verifier)
 
     creche-sink --verify run by an auditor against saved output, a trust bundle, the sink SPIFFE IDs and the pod history
@@ -485,6 +490,10 @@ Data-flow diagram of "creche". A box is an external entity, a stadium a process,
 - [Central Log Store](#central-log-store) (out of scope)
 
     The second store that keeps checkpoints out of reach of the node
+
+- [Evidence Export](#evidence-export) (out of scope)
+
+    The auditor's own tools that export the stream lines from the central store and the pod history from the cluster, such as the store's client and kubectl
 
 - [Kata VMM](#kata-vmm) (out of scope)
 
@@ -606,7 +615,7 @@ _This list is not complete and regulatory or law relevant abuse cases have to be
 
 ## STRIDE Classification of Identified Risks
 
-This chapter clusters and classifies the risks by STRIDE categories: in total **50 potential risks** have been identified during the threat modeling process.
+This chapter clusters and classifies the risks by STRIDE categories: in total **51 potential risks** have been identified during the threat modeling process.
 
 ### Spoofing
 
@@ -664,7 +673,7 @@ Repudiation, against non-repudiability
 
 ### Information Disclosure
 
-**18 risks**
+**17 risks**
 
 Information disclosure, against confidentiality
 
@@ -684,10 +693,6 @@ Information disclosure, against confidentiality
 
     Sourcecode repositories (including their histories) as well as artifact registries can accidentally contain secrets like checked-in or packaged-in passwords, API tokens, certificates, crypto keys, etc.
 
-- **Medium**: [Missing Vault (Secret Storage)](#missing-vault-secret-storage): 1 mitigated Risk, exploitation likelihood is _Unlikely_ with _Medium_ impact
-
-    In order to avoid the risk of secret leakage via config files (when attacked through vulnerabilities being able to read files like Path-Traversal and others), it is best practice to use a separate hardened process with proper authentication, authorization, and audit logging to access config secrets (like credentials, private keys, client certificates, etc.). This component is usually some kind of Vault.
-
 - **Medium**: [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf): 1/4 unmitigated Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
     When a server system (i.e. not a client) is accessing other server systems via typical web protocols Server-Side Request Forgery (SSRF) or Local-File-Inclusion (LFI) or Remote-File-Inclusion (RFI) risks might arise.
@@ -706,15 +711,17 @@ Information disclosure, against confidentiality
 
 ### Denial of Service
 
-**0 risks**
+**1 risk**
 
 Denial of service, against availability
 
-_No risks were identified._
+- **Elevated**: [Tenant Resource Exhaustion](#tenant-resource-exhaustion): 1/1 unmitigated Risk, exploitation likelihood is _Likely_ with _Medium_ impact
+
+    A multi-tenant asset shares its connections, queues, memory and processing time among its tenants. A tenant that sends more than its share, by mistake or on purpose, takes them from the others. For a collector of logs, events or audit records this does more than slow it down: the records of the other tenants are dropped, and whoever reads them can no longer tell a quiet tenant from one that was not heard.
 
 ### Elevation of Privilege
 
-**11 risks**
+**12 risks**
 
 Elevation of privilege, against authorization
 
@@ -730,10 +737,6 @@ Elevation of privilege, against authorization
 
     A guardrail screens what reaches a language model or an agent, and what comes back from it, for prompt injection, jailbreaks and data that must not pass, independently of the model. Without one, the instructions of the system prompt are the only defense, and a model follows whatever content convinces it.
 
-- **Elevated**: [Missing Authentication](#missing-authentication): 1 mitigated Risk, exploitation likelihood is _Likely_ with _High_ impact
-
-    Technical assets (especially multi-tenant systems) should authenticate incoming requests when the asset processes sensitive data.
-
 - **Elevated**: [Unguarded Access From Internet](#unguarded-access-from-internet): 6/6 unmitigated Risks, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
     Internet-exposed assets must be guarded by a protecting service, application, or reverse-proxy.
@@ -746,9 +749,13 @@ Elevation of privilege, against authorization
 
     Internet-exposed assets must be guarded by a protecting service, application, or reverse-proxy.
 
+- **Medium**: [Virtual Machine Escape](#virtual-machine-escape): 2/2 unmitigated Risks, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    A hypervisor isolates its guests from its host and from each other, and sandboxes like Kata Containers or Firecracker rely on that to run untrusted code. Code that exploits a vulnerability of the hypervisor or of the devices it emulates escapes its virtual machine and runs on the host, with the privileges of the hypervisor, next to the host's own services and every other guest.
+
 ## Assignment by Function
 
-This chapter clusters and assigns the risks by functions which are most likely able to check and mitigate them: in total **50 potential risks** have been identified during the threat modeling process.
+This chapter clusters and assigns the risks by functions which are most likely able to check and mitigate them: in total **51 potential risks** have been identified during the threat modeling process.
 
 ### Business Side
 
@@ -762,7 +769,7 @@ Business
 
 ### Architecture
 
-**21 risks**
+**20 risks**
 
 Architecture
 
@@ -774,13 +781,13 @@ Architecture
 
     Screen the untrusted input of the model or agent, and its output, with a guardrail like a prompt injection classifier, a content safety service or a policy framework for agents, and block or flag what it finds. Model a guardrail service as an ai-guardrail technical asset in the path of the untrusted content, or one the agent asks, and a guardrail library inside the agent by adding ai-guardrail to the technologies of the agent. A guardrail lowers the risk of prompt injection, but does not remove it.
 
-- **Elevated**: [Missing Authentication](#missing-authentication): 1 mitigated Risk, exploitation likelihood is _Likely_ with _High_ impact
-
-    Apply an authentication method to the technical asset. To protect highly sensitive data consider the use of multi-factor authentication for human users.
-
 - **Elevated**: [Sensitive Data Disclosure through Model Output](#sensitive-data-disclosure-through-model-output): 1/1 unmitigated Risk, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
     Give the model only the data the caller may see: filter retrieved documents by the caller's permissions before they reach the prompt, keep secrets and other users' data out of prompts and training data, and filter the output for sensitive data. Do not rely on the system prompt to keep anything secret.
+
+- **Elevated**: [Tenant Resource Exhaustion](#tenant-resource-exhaustion): 1/1 unmitigated Risk, exploitation likelihood is _Likely_ with _Medium_ impact
+
+    Give every tenant its own bounded share: limits on its connections, rate and queue length, and fair scheduling among tenants, so that one that floods only loses its own data. Count and report what is dropped per tenant, so that a gap can be told from silence, and alert on it.
 
 - **Elevated**: [Unguarded Access From Internet](#unguarded-access-from-internet): 6/6 unmitigated Risks, exploitation likelihood is _Very Likely_ with _Medium_ impact
 
@@ -793,10 +800,6 @@ Architecture
 - **Medium**: [Missing Identity Store](#missing-identity-store): 1/1 unmitigated Risk, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
     Include an identity store in the model if the application has a login.
-
-- **Medium**: [Missing Vault (Secret Storage)](#missing-vault-secret-storage): 1 mitigated Risk, exploitation likelihood is _Unlikely_ with _Medium_ impact
-
-    Consider using a Vault (Secret Storage) to securely store and access config secrets (like credentials, private keys, client certificates, etc.).
 
 - **Medium**: [Unchecked Deployment](#unchecked-deployment): 1/5 unmitigated Risks, exploitation likelihood is _Unlikely_ with _Medium_ impact
 
@@ -846,7 +849,7 @@ Development
 
 ### Operations
 
-**18 risks**
+**20 risks**
 
 Operations
 
@@ -873,6 +876,10 @@ Operations
 - **Medium**: [Unencrypted Technical Assets](#unencrypted-technical-assets): 3/5 unmitigated Risks, exploitation likelihood is _Unlikely_ with _High_ impact
 
     Apply encryption to the technical asset.
+
+- **Medium**: [Virtual Machine Escape](#virtual-machine-escape): 2/2 unmitigated Risks, exploitation likelihood is _Unlikely_ with _High_ impact
+
+    Keep the hypervisor, its device emulation and the host kernel patched, and prefer a hypervisor with a small device model, like _Firecracker_ or _Cloud Hypervisor_. Run it as an unprivileged user with a seccomp filter and in its own namespaces, like the _Firecracker jailer_ does, and keep host services that hold secrets away from hosts that run untrusted guests. Where the host itself is not trusted, consider confidential virtual machines (_AMD SEV-SNP_, _Intel TDX_).
 
 ## RAA Analysis
 
@@ -912,7 +919,7 @@ The following lists all technical assets sorted by their RAA value from highest 
 
     Where the maintainer works, with hk, mise and coding agents
 
-- [creche Sink](#creche-sink): RAA 24 %
+- [creche Sink](#creche-sink): RAA 24 %, highest severity still at risk: **Elevated**
 
     Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
 
@@ -1029,7 +1036,7 @@ This chapter lists all technical assets that have been defined as out-of-scope. 
 
 ## Potential Model Failures
 
-**3 of 6 unmitigated**
+**3 of 5 unmitigated**
 
 This chapter lists potential model failures where not all relevant assets have been modeled or the model might itself contain inconsistencies. Each potential model failure should be checked in the model against the architecture design:
 
@@ -1045,17 +1052,13 @@ This chapter lists potential model failures where not all relevant assets have b
 
     The modeled architecture does not contain an identity store, which might be the risk of a model missing critical assets (and thus not seeing their risks).
 
-- **Medium**: [Missing Vault (Secret Storage)](#missing-vault-secret-storage): 1 mitigated Risk, exploitation likelihood is _Unlikely_ with _Medium_ impact
-
-    In order to avoid the risk of secret leakage via config files (when attacked through vulnerabilities being able to read files like Path-Traversal and others), it is best practice to use a separate hardened process with proper authentication, authorization, and audit logging to access config secrets (like credentials, private keys, client certificates, etc.). This component is usually some kind of Vault.
-
 - **Low**: [Wrong Communication Link Content](#wrong-communication-link-content): 2 mitigated Risks, exploitation likelihood is _Unlikely_ with _Low_ impact
 
     When a communication link is defined as readonly, but does not receive any data asset, or when it is defined as not readonly, but does not send any data asset, it is likely to be a model failure.
 
 ## Identified Risks by Vulnerability Category
 
-In total **50 potential risks** have been identified during the threat modeling process, distributed across **21 vulnerability categories**. The following sections describe each identified risk category and its risks.
+In total **51 potential risks** have been identified during the threat modeling process, distributed across **21 vulnerability categories**. The following sections describe each identified risk category and its risks.
 
 ### Prompt Injection
 
@@ -1425,6 +1428,56 @@ The risk **Sensitive Data Disclosure through Model Output** was found **1 time**
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Elevated | **Sensitive Data Disclosure through Model Output** risk at **Coding Agent** | `model-output-disclosure@coding-agent` | Very Likely | Medium | [Coding Agent](#coding-agent) | Unchecked | _not tracked_ |
 
+### Tenant Resource Exhaustion
+
+**Elevated**, 1/1 unmitigated Risk, `tenant-resource-exhaustion`
+
+| Property | Value |
+| --- | --- |
+| STRIDE | Denial of Service |
+| CWE | [CWE 400](https://cwe.mitre.org/data/definitions/400.html) |
+| Function | Architecture |
+| Action | Per-Tenant Limits |
+| ASVS chapter | V1: Architecture, Design and Threat Modeling Requirements |
+| Cheat sheet | [Denial_of_Service_Cheat_Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html) |
+| References | OWASP API4:2023 Unrestricted Resource Consumption |
+
+#### Description
+
+A multi-tenant asset shares its connections, queues, memory and processing time among its tenants. A tenant that sends more than its share, by mistake or on purpose, takes them from the others. For a collector of logs, events or audit records this does more than slow it down: the records of the other tenants are dropped, and whoever reads them can no longer tell a quiet tenant from one that was not heard.
+
+#### Impact
+
+If this risk is unmitigated, one tenant might deny the service to the others, or make the asset lose their data, such as the audit records that would show what that tenant did.
+
+#### Detection Logic
+
+In-scope multi-tenant technical assets that receive data over a communication link from a caller that is out of scope or in another trust boundary, of any type. Read-only links, which send no data, and links of devops usage are left out.
+
+#### Risk Rating
+
+Likely. The impact follows the higher of the availability of the asset and the integrity of the data it receives over the link: low below critical, medium for critical and high for mission-critical.
+
+#### False Positives
+
+Assets that already give every tenant its own bounded share can be considered as false positives after individual review.
+
+#### Mitigation
+
+Give every tenant its own bounded share: limits on its connections, rate and queue length, and fair scheduling among tenants, so that one that floods only loses its own data. Count and report what is dropped per tenant, so that a gap can be told from silence, and alert on it.
+
+#### Check
+
+Are recommendations from the linked cheat sheet and referenced ASVS chapter applied?
+
+#### Risk Findings
+
+The risk **Tenant Resource Exhaustion** was found **1 time** in the analyzed architecture to be potentially possible. Each spot should be checked individually by reviewing the implementation whether all controls have been applied properly in order to mitigate each risk.
+
+| Severity | Risk | ID | Likelihood | Impact | Most relevant | Status | Tracking |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Elevated | **Tenant Resource Exhaustion** of **creche Sink** by tenants behind **Kata VMM** via **Hybrid Vsock** | `tenant-resource-exhaustion@creche-sink@kata-vmm>hybrid-vsock` | Likely | Medium | [creche Sink](#creche-sink), [Hybrid Vsock](#hybrid-vsock) | Unchecked | _not tracked_ |
+
 ### Unguarded Access From Internet
 
 **Elevated**, 6/6 unmitigated Risks, `unguarded-access-from-internet`
@@ -1686,6 +1739,57 @@ The risk **Unencrypted Technical Assets** was found **5 times** in the analyzed 
 | Medium | **Unencrypted Technical Asset** named **GitHub Releases** | `unencrypted-asset@github-releases` | Unlikely | High | [GitHub Releases](#github-releases) | False Positive | 2026-11-14. The releases are public. |
 | Medium | **Unencrypted Technical Asset** named **GitHub Repository** | `unencrypted-asset@github-repo` | Unlikely | Medium | [GitHub Repository](#github-repository) | False Positive | 2026-11-14. The source is public. |
 
+### Virtual Machine Escape
+
+**Medium**, 2/2 unmitigated Risks, `virtual-machine-escape`
+
+| Property | Value |
+| --- | --- |
+| STRIDE | Elevation of Privilege |
+| CWE | [CWE 1008](https://cwe.mitre.org/data/definitions/1008.html) |
+| Function | Operations |
+| Action | Hypervisor Hardening |
+| ASVS chapter | V14: Configuration Verification Requirements |
+| Cheat sheet | [final](https://csrc.nist.gov/pubs/sp/800/125/a/r1/final) |
+| References | OWASP A02:2025 Security Misconfiguration |
+
+#### Description
+
+A hypervisor isolates its guests from its host and from each other, and sandboxes like Kata Containers or Firecracker rely on that to run untrusted code. Code that exploits a vulnerability of the hypervisor or of the devices it emulates escapes its virtual machine and runs on the host, with the privileges of the hypervisor, next to the host's own services and every other guest.
+
+#### Impact
+
+If this risk is unmitigated, attackers who control a guest, or the code it runs, might take over the host and from there every other virtual machine on it and the services the host runs.
+
+#### Detection Logic
+
+Technical assets of the technology hypervisor. Their host is the trust boundary that holds them and their guests are the technical assets of the trust boundaries nested in it. An in-scope hypervisor gets the risk. For an out-of-scope one, like the hypervisor of a cloud or a sandbox runtime, each in-scope technical asset of its host gets it, since those are what an escape reaches.
+
+#### Risk Rating
+
+Escapes are unlikely. The impact is high when a technical asset of the host or of its guests processes strictly-confidential or mission-critical data, and medium otherwise.
+
+#### False Positives
+
+Hypervisors that only run trusted guests, on hosts that run nothing else, can be considered as false positives after individual review.
+
+#### Mitigation
+
+Keep the hypervisor, its device emulation and the host kernel patched, and prefer a hypervisor with a small device model, like _Firecracker_ or _Cloud Hypervisor_. Run it as an unprivileged user with a seccomp filter and in its own namespaces, like the _Firecracker jailer_ does, and keep host services that hold secrets away from hosts that run untrusted guests. Where the host itself is not trusted, consider confidential virtual machines (_AMD SEV-SNP_, _Intel TDX_).
+
+#### Check
+
+Are recommendations from the linked cheat sheet and referenced ASVS chapter applied?
+
+#### Risk Findings
+
+The risk **Virtual Machine Escape** was found **2 times** in the analyzed architecture to be potentially possible. Each spot should be checked individually by reviewing the implementation whether all controls have been applied properly in order to mitigate each risk.
+
+| Severity | Risk | ID | Likelihood | Impact | Most relevant | Status | Tracking |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Medium | **Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive** | `virtual-machine-escape@kata-vmm@audit-archive` | Unlikely | High | [Audit Archive](#audit-archive) | Unchecked | _not tracked_ |
+| Medium | **Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink** | `virtual-machine-escape@kata-vmm@creche-sink` | Unlikely | High | [creche Sink](#creche-sink) | Unchecked | _not tracked_ |
+
 ### Server-Side Request Forgery (SSRF)
 
 **Low**, 1/4 unmitigated Risks, `server-side-request-forgery`
@@ -1844,56 +1948,6 @@ The risk **Accidental Secret Leak** was found **2 times** in the analyzed archit
 | Medium | **Accidental Secret Leak** risk at **GitHub Releases** | `accidental-secret-leak@github-releases` | Unlikely | High | [GitHub Releases](#github-releases) | Mitigated | 2026-11-14. Releases hold only the reproducible builds, checksums and provenance. |
 | Medium | **Accidental Secret Leak** risk at **GitHub Repository** | `accidental-secret-leak@github-repo` | Unlikely | Medium | [GitHub Repository](#github-repository) | Mitigated | 2026-11-14. hk runs the kingfisher secret scan before each commit. |
 
-### Missing Authentication
-
-1 mitigated Risk, `missing-authentication`
-
-| Property | Value |
-| --- | --- |
-| STRIDE | Elevation of Privilege |
-| CWE | [CWE 306](https://cwe.mitre.org/data/definitions/306.html) |
-| Function | Architecture |
-| Action | Authentication of Incoming Requests |
-| ASVS chapter | V2: Authentication Verification Requirements |
-| Cheat sheet | [Authentication_Cheat_Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html) |
-| References | OWASP A07:2025 Authentication Failures, OWASP API2:2023 Broken Authentication |
-
-#### Description
-
-Technical assets (especially multi-tenant systems) should authenticate incoming requests when the asset processes sensitive data.
-
-#### Impact
-
-If this risk is unmitigated, attackers might be able to access or modify sensitive data in an unauthenticated way.
-
-#### Detection Logic
-
-In-scope technical assets (except load-balancer, reverse-proxy, service-registry, waf, ids, and ips and in-process calls) should authenticate incoming requests when the asset processes sensitive data. This is especially the case for all multi-tenant assets (there even non-sensitive ones). Links over industrial control protocols that cannot authenticate are left to the insecure-control-protocol rule.
-
-#### Risk Rating
-
-The risk rating (medium or high) depends on the sensitivity of the data sent across the communication link. Monitoring callers are exempted from this risk.
-
-#### False Positives
-
-Technical assets which do not process requests regarding functionality or data linked to end-users (customers) can be considered as false positives after individual review.
-
-#### Mitigation
-
-Apply an authentication method to the technical asset. To protect highly sensitive data consider the use of multi-factor authentication for human users.
-
-#### Check
-
-Are recommendations from the linked cheat sheet and referenced ASVS chapter applied?
-
-#### Risk Findings
-
-The risk **Missing Authentication** was found **1 time** in the analyzed architecture to be potentially possible. Each spot should be checked individually by reviewing the implementation whether all controls have been applied properly in order to mitigate each risk.
-
-| Severity | Risk | ID | Likelihood | Impact | Most relevant | Status | Tracking |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Elevated | **Missing Authentication** covering communication link **Download Release** from **Image Builder** to **GitHub Releases** | `missing-authentication@image-builder>download-release@image-builder@github-releases` | Likely | High | [GitHub Releases](#github-releases), [Download Release](#download-release) | Mitigated | 2026-11-14. Releases are public. Integrity comes from sha256sum, cosign verify-blob pinned to the release workflow's identity and slsa-verifier (README, Releases). |
-
 ### Missing File Validation
 
 2 mitigated Risks, `missing-file-validation`
@@ -1944,56 +1998,6 @@ The risk **Missing File Validation** was found **2 times** in the analyzed archi
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Elevated | **Missing File Validation** risk at **GitHub Actions** | `missing-file-validation@github-actions` | Very Likely | Medium | [GitHub Actions](#github-actions) | False Positive | 2026-11-14. The workflows take no uploads, only the repository's own checkout. |
 | Elevated | **Missing File Validation** risk at **creche Verifier** | `missing-file-validation@creche-verifier` | Very Likely | Medium | [creche Verifier](#creche-verifier) | False Positive | 2026-11-14. The verifier is a command line tool that reads the files the auditor names, not an upload. |
-
-### Missing Vault (Secret Storage)
-
-1 mitigated Risk, `missing-vault`
-
-| Property | Value |
-| --- | --- |
-| STRIDE | Information Disclosure |
-| CWE | [CWE 522](https://cwe.mitre.org/data/definitions/522.html) |
-| Function | Architecture |
-| Action | Vault (Secret Storage) |
-| ASVS chapter | V6: Stored Cryptography Verification Requirements |
-| Cheat sheet | [Cryptographic_Storage_Cheat_Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html) |
-| References | OWASP NHI2:2025 Secret Leakage |
-
-#### Description
-
-In order to avoid the risk of secret leakage via config files (when attacked through vulnerabilities being able to read files like Path-Traversal and others), it is best practice to use a separate hardened process with proper authentication, authorization, and audit logging to access config secrets (like credentials, private keys, client certificates, etc.). This component is usually some kind of Vault.
-
-#### Impact
-
-If this risk is unmitigated, attackers might be able to easier steal config secrets (like credentials, private keys, client certificates, etc.) once a vulnerability to access files is present and exploited.
-
-#### Detection Logic
-
-Models without a Vault (Secret Storage).
-
-#### Risk Rating
-
-The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed.
-
-#### False Positives
-
-Models where no technical assets have any kind of sensitive config data to protect can be considered as false positives after individual review.
-
-#### Mitigation
-
-Consider using a Vault (Secret Storage) to securely store and access config secrets (like credentials, private keys, client certificates, etc.).
-
-#### Check
-
-GetAttribute a Vault (Secret Storage) in place?
-
-#### Risk Findings
-
-The risk **Missing Vault (Secret Storage)** was found **1 time** in the analyzed architecture to be potentially possible. Each spot should be checked individually by reviewing the implementation whether all controls have been applied properly in order to mitigate each risk.
-
-| Severity | Risk | ID | Likelihood | Impact | Most relevant | Status | Tracking |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Medium | **Missing Vault (Secret Storage)** in the threat model (referencing asset **creche Sink** as an example) | `missing-vault@creche-sink` | Unlikely | Medium | [creche Sink](#creche-sink) | Mitigated | 2026-11-14. The SVID comes from the SPIFFE Workload API, and each stream's signing key lives in memory only and is erased once the next key is derived (ADR 0014). |
 
 ### Path-Traversal
 
@@ -2152,7 +2156,7 @@ The risk **Wrong Communication Link Content** was found **2 times** in the analy
 
 ## Identified Risks by Technical Asset
 
-In total **50 potential risks** have been identified during the threat modeling process, distributed across **12 in-scope technical assets**. The RAA value of a technical asset is the calculated "Relative Attacker Attractiveness" value in percent.
+In total **51 potential risks** have been identified during the threat modeling process, distributed across **12 in-scope technical assets**. The RAA value of a technical asset is the calculated "Relative Attacker Attractiveness" value in percent.
 
 ### Coding Agent
 
@@ -2206,13 +2210,14 @@ A coding agent on the workstation, with the hk and mise MCP servers from .mcp.js
 
 ### Audit Archive
 
-**Elevated**, 2/2 unmitigated Risks, `audit-archive`
+**Elevated**, 3/3 unmitigated Risks, `audit-archive`
 
 The JSON lines file on the node
 
 #### Identified Risks of the Asset
 
 - **Elevated**: [**Missing Hardening** risk at **Audit Archive**](#missing-hardening) (Accepted)
+- **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
 - **Medium**: [**Unencrypted Technical Asset** named **Audit Archive** missing end user individual encryption with data-with-end-user-individual-key](#unencrypted-technical-assets) (Accepted)
 
 #### Asset Information
@@ -2296,7 +2301,7 @@ The files the auditor exported for a check, the stream lines, the trust bundle a
 
 ### GitHub Releases
 
-**Elevated**, 2/7 unmitigated Risks, `github-releases`
+**Elevated**, 2/6 unmitigated Risks, `github-releases`
 
 Release downloads of Pinguladora/creche
 
@@ -2304,7 +2309,6 @@ Release downloads of Pinguladora/creche
 
 - **Elevated**: [**Unguarded Access from Internet** of **GitHub Releases** by **GitHub Actions** via **Publish Release**](#unguarded-access-from-internet) (Accepted)
 - **Elevated**: [**Unguarded Access from Internet** of **GitHub Releases** by **Image Builder** via **Download Release**](#unguarded-access-from-internet) (Accepted)
-- **Elevated**: [**Missing Authentication** covering communication link **Download Release** from **Image Builder** to **GitHub Releases**](#missing-authentication) (Mitigated)
 - **Medium**: [**Accidental Secret Leak** risk at **GitHub Releases**](#accidental-secret-leak) (Mitigated)
 - **Medium**: [**Code Backdooring** risk at **GitHub Releases**](#code-backdooring) (Mitigated)
 - **Medium**: [**Unencrypted Technical Asset** named **GitHub Releases**](#unencrypted-technical-assets) (False Positive)
@@ -2343,6 +2347,54 @@ Release downloads of Pinguladora/creche
 | Integrity | mission-critical |
 | Availability | operational |
 | CIA justification | What the nodes and guest images install |
+
+### creche Sink
+
+**Elevated**, 2/5 unmitigated Risks, `creche-sink`
+
+Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
+
+#### Identified Risks of the Asset
+
+- **High**: [**Path-Traversal** risk at **creche Sink** against filesystem **Audit Archive** via **Write Archive**](#path-traversal) (False Positive)
+- **Elevated**: [**Tenant Resource Exhaustion** of **creche Sink** by tenants behind **Kata VMM** via **Hybrid Vsock**](#tenant-resource-exhaustion) (Unchecked)
+- **Elevated**: [**Untrusted Deserialization** risk at **creche Sink**](#untrusted-deserialization) (Mitigated)
+- **Elevated**: [**Path-Traversal** risk at **creche Sink** against filesystem **containerd Bundles** via **Read Bundle**](#path-traversal) (Mitigated)
+- **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
+
+#### Asset Information
+
+| Property | Value |
+| --- | --- |
+| Type | process |
+| Usage | business |
+| RAA | 24 % |
+| Size | service |
+| Technology | monitoring |
+| Tags | none |
+| Trust boundary | [Node](#node) |
+| Internet | no |
+| Machine | virtual |
+| Encryption | none |
+| Multi-tenant | yes |
+| Redundant | no |
+| Custom-developed | yes |
+| Client used by a human | no |
+| Data formats accepted | Serialization |
+| Data processed | [Agent Labels](#agent-labels), [Audit Trail](#audit-trail), [Guest Events](#guest-events), [Pod Identity](#pod-identity), [Sink Signing Keys](#sink-signing-keys) |
+| Data stored | none |
+| Outgoing communication links | [Write Archive](#write-archive), [Workload API](#workload-api), [Read Bundle](#read-bundle), [OTLP Export](#otlp-export) |
+| Incoming communication links | [Hybrid Vsock](#hybrid-vsock) |
+
+#### Asset Rating
+
+| Property | Value |
+| --- | --- |
+| Owner | creche maintainers |
+| Confidentiality | strictly-confidential |
+| Integrity | mission-critical |
+| Availability | important |
+| CIA justification | Root or the VMM's user on every node, parses input from untrusted guests and holds the signing keys |
 
 ### GitHub Repository
 
@@ -2441,51 +2493,6 @@ Where the maintainer works, with hk, mise and coding agents
 | Integrity | critical |
 | Availability | operational |
 | CIA justification | Pushes the code every release is built from |
-
-### Evidence Export
-
-**out of scope**, `evidence-export`
-
-The auditor's own tools that export the stream lines from the central store and the pod history from the cluster, such as the store's client and kubectl
-
-#### Identified Risks of the Asset
-
-- **Medium**: [**Missing Identity Store** in the threat model (referencing asset **Evidence Export** as an example)](#missing-identity-store) (Accepted)
-
-#### Asset Information
-
-| Property | Value |
-| --- | --- |
-| Type | process |
-| Usage | business |
-| RAA | out of scope |
-| Size | application |
-| Technology | cli |
-| Tags | none |
-| Trust boundary | [Security Backend](#security-backend) |
-| Internet | no |
-| Machine | physical |
-| Encryption | none |
-| Multi-tenant | no |
-| Redundant | no |
-| Custom-developed | no |
-| Client used by a human | yes |
-| Data formats accepted | JSON |
-| Data processed | [Audit Trail](#audit-trail), [Pod History](#pod-history) |
-| Data stored | none |
-| Outgoing communication links | [Write Evidence](#write-evidence), [Export Trail](#export-trail), [Export Pod History](#export-pod-history) |
-| Incoming communication links | none |
-
-#### Asset Rating
-
-| Property | Value |
-| --- | --- |
-| Owner | Security Team |
-| Confidentiality | confidential |
-| Integrity | mission-critical |
-| Availability | important |
-| CIA justification | Produces what the verifier checks |
-| Out-of-scope justification | The auditor's tools, not part of creche |
 
 ### Image Builder
 
@@ -2671,53 +2678,6 @@ Loads the BPF programs with aya, drains the ring buffer and forwards whole recor
 | Availability | important |
 | CIA justification | Root in the guest, the only process allowed on the vsock port |
 
-### creche Sink
-
-4 mitigated Risks, `creche-sink`
-
-Decodes the bounds checked records, attests sandbox and pod, writes JSON lines with checkpoints, signs them with the SVID and exports OTLP
-
-#### Identified Risks of the Asset
-
-- **High**: [**Path-Traversal** risk at **creche Sink** against filesystem **Audit Archive** via **Write Archive**](#path-traversal) (False Positive)
-- **Elevated**: [**Untrusted Deserialization** risk at **creche Sink**](#untrusted-deserialization) (Mitigated)
-- **Elevated**: [**Path-Traversal** risk at **creche Sink** against filesystem **containerd Bundles** via **Read Bundle**](#path-traversal) (Mitigated)
-- **Medium**: [**Missing Vault (Secret Storage)** in the threat model (referencing asset **creche Sink** as an example)](#missing-vault-secret-storage) (Mitigated)
-
-#### Asset Information
-
-| Property | Value |
-| --- | --- |
-| Type | process |
-| Usage | business |
-| RAA | 24 % |
-| Size | service |
-| Technology | monitoring |
-| Tags | none |
-| Trust boundary | [Node](#node) |
-| Internet | no |
-| Machine | virtual |
-| Encryption | none |
-| Multi-tenant | yes |
-| Redundant | no |
-| Custom-developed | yes |
-| Client used by a human | no |
-| Data formats accepted | Serialization |
-| Data processed | [Agent Labels](#agent-labels), [Audit Trail](#audit-trail), [Guest Events](#guest-events), [Pod Identity](#pod-identity), [Sink Signing Keys](#sink-signing-keys) |
-| Data stored | none |
-| Outgoing communication links | [Write Archive](#write-archive), [Workload API](#workload-api), [Read Bundle](#read-bundle), [OTLP Export](#otlp-export) |
-| Incoming communication links | [Hybrid Vsock](#hybrid-vsock) |
-
-#### Asset Rating
-
-| Property | Value |
-| --- | --- |
-| Owner | creche maintainers |
-| Confidentiality | strictly-confidential |
-| Integrity | mission-critical |
-| Availability | important |
-| CIA justification | Root or the VMM's user on every node, parses input from untrusted guests and holds the signing keys |
-
 ### creche Verifier
 
 2 mitigated Risks, `creche-verifier`
@@ -2896,6 +2856,51 @@ _The asset was defined as out-of-scope._
 | Availability | important |
 | CIA justification | The copy of the audit trail a node cannot reach |
 | Out-of-scope justification | Operated by the security team |
+
+### Evidence Export
+
+**out of scope**, `evidence-export`
+
+The auditor's own tools that export the stream lines from the central store and the pod history from the cluster, such as the store's client and kubectl
+
+#### Identified Risks of the Asset
+
+- **Medium**: [**Missing Identity Store** in the threat model (referencing asset **Evidence Export** as an example)](#missing-identity-store) (Accepted)
+
+#### Asset Information
+
+| Property | Value |
+| --- | --- |
+| Type | process |
+| Usage | business |
+| RAA | out of scope |
+| Size | application |
+| Technology | cli |
+| Tags | none |
+| Trust boundary | [Security Backend](#security-backend) |
+| Internet | no |
+| Machine | physical |
+| Encryption | none |
+| Multi-tenant | no |
+| Redundant | no |
+| Custom-developed | no |
+| Client used by a human | yes |
+| Data formats accepted | JSON |
+| Data processed | [Audit Trail](#audit-trail), [Pod History](#pod-history) |
+| Data stored | none |
+| Outgoing communication links | [Write Evidence](#write-evidence), [Export Trail](#export-trail), [Export Pod History](#export-pod-history) |
+| Incoming communication links | none |
+
+#### Asset Rating
+
+| Property | Value |
+| --- | --- |
+| Owner | Security Team |
+| Confidentiality | confidential |
+| Integrity | mission-critical |
+| Availability | important |
+| CIA justification | Produces what the verifier checks |
+| Out-of-scope justification | The auditor's tools, not part of creche |
 
 ### Kata VMM
 
@@ -3095,7 +3100,7 @@ _The asset was defined as out-of-scope._
 | Usage | devops |
 | RAA | out of scope |
 | Size | service |
-| Technology | identity-provider |
+| Technology | workload-identity |
 | Tags | none |
 | Trust boundary | [Node](#node) |
 | Internet | no |
@@ -3214,11 +3219,11 @@ _The asset was defined as out-of-scope._
 
 ## Identified Data Breach Probabilities by Data Asset
 
-In total **50 potential risks** have been identified during the threat modeling process, distributed across **10 data assets**. The following sections describe the derived data breach probabilities grouped by data asset.
+In total **51 potential risks** have been identified during the threat modeling process, distributed across **10 data assets**. The following sections describe the derived data breach probabilities grouped by data asset.
 
 ### Agent Labels
 
-**Probable**, 1/3 unmitigated Risks, `agent-labels`
+**Probable**, 3/5 unmitigated Risks, `agent-labels`
 
 user.creche.agent extended attributes the agents set on their delegated cgroups
 
@@ -3241,13 +3246,15 @@ user.creche.agent extended attributes the agents set on their delegated cgroups
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 1 remaining risk:
+This data asset has data breach potential because of 3 remaining risks:
 
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
 
 ### Audit Trail
 
-**Probable**, 6/10 unmitigated Risks, `audit-trail`
+**Probable**, 8/12 unmitigated Risks, `audit-trail`
 
 JSON lines with stream sequence numbers, hash chained checkpoints and their signatures
 
@@ -3270,8 +3277,10 @@ JSON lines with stream sequence numbers, hash chained checkpoints and their sign
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 6 remaining risks:
+This data asset has data breach potential because of 8 remaining risks:
 
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Security Backend**](#missing-cloud-hardening) (Accepted)
 - Improbable, **Elevated**: [**Missing Hardening** risk at **Audit Archive**](#missing-hardening) (Accepted)
@@ -3345,7 +3354,7 @@ This data asset has data breach potential because of 7 remaining risks:
 
 ### Guest Events
 
-**Probable**, 1/3 unmitigated Risks, `guest-events`
+**Probable**, 3/5 unmitigated Risks, `guest-events`
 
 Process, connect and file write records from the guest, with command arguments, paths and destinations
 
@@ -3368,8 +3377,10 @@ Process, connect and file write records from the guest, with command arguments, 
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 1 remaining risk:
+This data asset has data breach potential because of 3 remaining risks:
 
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
 
 ### Pod History
@@ -3406,7 +3417,7 @@ This data asset has data breach potential because of 4 remaining risks:
 
 ### Pod Identity
 
-**Probable**, 1/3 unmitigated Risks, `pod-identity`
+**Probable**, 3/5 unmitigated Risks, `pod-identity`
 
 Pod name, namespace and uid from the annotations in the sandbox's OCI spec
 
@@ -3429,13 +3440,15 @@ Pod name, namespace and uid from the annotations in the sandbox's OCI spec
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 1 remaining risk:
+This data asset has data breach potential because of 3 remaining risks:
 
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
 
 ### Release Artifacts
 
-**Probable**, 4/16 unmitigated Risks, `release-artifacts`
+**Probable**, 4/15 unmitigated Risks, `release-artifacts`
 
 Static musl builds of creche-observer and creche-sink, signed checksums and SLSA provenance
 
@@ -3467,7 +3480,7 @@ This data asset has data breach potential because of 4 remaining risks:
 
 ### Sink Signing Keys
 
-**Probable**, 1/2 unmitigated Risks, `sink-keys`
+**Probable**, 3/4 unmitigated Risks, `sink-keys`
 
 The sink's X.509-SVID and the per stream P-256 keys that sign checkpoints
 
@@ -3490,8 +3503,10 @@ The sink's X.509-SVID and the per stream P-256 keys that sign checkpoints
 
 #### Data Breach Risks
 
-This data asset has data breach potential because of 1 remaining risk:
+This data asset has data breach potential because of 3 remaining risks:
 
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **Audit Archive**](#virtual-machine-escape) (Unchecked)
+- Probable, **Medium**: [**Virtual Machine Escape** risk at **Kata VMM** exposing **creche Sink**](#virtual-machine-escape) (Unchecked)
 - Probable, **Elevated**: [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) (Accepted)
 
 ### Source Code
@@ -4140,13 +4155,12 @@ Reads the exported lines, the trust bundle and the pod history named on its comm
 
 ## Risk Tracking
 
-**40 of 50 risks** are tracked in the model. The others are unchecked.
+**38 of 51 risks** are tracked in the model. The others are unchecked.
 
 | Risk | ID | Severity | Status | Date | Checked by | Ticket | Justification |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | [**Path-Traversal** risk at **creche Sink** against filesystem **Audit Archive** via **Write Archive**](#path-traversal) | `path-traversal@creche-sink@audit-archive@creche-sink>write-archive` | High | False Positive | 2026-11-14 |  |  | The sink writes to stdout only. The operator's redirect names the file, and no path comes from the guest. |
 | [**Path-Traversal** risk at **creche Verifier** against filesystem **Audit Evidence** via **Read Evidence**](#path-traversal) | `path-traversal@creche-verifier@audit-evidence@creche-verifier>read-evidence` | High | False Positive | 2026-11-14 |  |  | The verifier opens only the files named on its command line. No path comes from the data it reads. |
-| [**Missing Authentication** covering communication link **Download Release** from **Image Builder** to **GitHub Releases**](#missing-authentication) | `missing-authentication@image-builder>download-release@image-builder@github-releases` | Elevated | Mitigated | 2026-11-14 |  |  | Releases are public. Integrity comes from sha256sum, cosign verify-blob pinned to the release workflow's identity and slsa-verifier (README, Releases). |
 | [**Missing Cloud Hardening** risk at **Cluster Network**](#missing-cloud-hardening) | `missing-cloud-hardening@cluster-network` | Elevated | Accepted | 2026-11-14 |  |  | The cluster is the integrator's. |
 | [**Missing Cloud Hardening** risk at **GitHub**](#missing-cloud-hardening) | `missing-cloud-hardening@github` | Elevated | Accepted | 2026-11-14 |  |  | GitHub's hosting is not ours to harden. What we control is covered by the build and release entries above, and Scorecard runs on the repository. |
 | [**Missing Cloud Hardening** risk at **Security Backend**](#missing-cloud-hardening) | `missing-cloud-hardening@security-backend` | Elevated | Accepted | 2026-11-14 |  |  | The security backend is the integrator's. |
@@ -4165,7 +4179,6 @@ Reads the exported lines, the trust bundle and the pod history named on its comm
 | [**Code Backdooring** risk at **GitHub Actions**](#code-backdooring) | `code-backdooring@github-actions` | Medium | Mitigated | 2026-11-14 |  |  | Actions are pinned by digest, harden-runner blocks egress outside an allowlist in every workflow, and zizmor checks the workflows. The SLSA generator is the exception, referenced by its tag v2.1.0 because slsa-verifier checks that tag (.github/zizmor.yml). A tag moved upstream would run another generator with the release's id-token permission. |
 | [**Code Backdooring** risk at **GitHub Releases**](#code-backdooring) | `code-backdooring@github-releases` | Medium | Mitigated | 2026-11-14 |  |  | checksums.txt is signed keyless with cosign, every tarball has SLSA provenance, and the release workflow's last job downloads and verifies the release. |
 | [**Missing Identity Store** in the threat model (referencing asset **Evidence Export** as an example)](#missing-identity-store) | `missing-identity-store@evidence-export` | Medium | Accepted | 2026-11-14 |  |  | Identities come from SPIRE, the cluster and the central store, all outside creche. |
-| [**Missing Vault (Secret Storage)** in the threat model (referencing asset **creche Sink** as an example)](#missing-vault-secret-storage) | `missing-vault@creche-sink` | Medium | Mitigated | 2026-11-14 |  |  | The SVID comes from the SPIFFE Workload API, and each stream's signing key lives in memory only and is erased once the next key is derived (ADR 0014). |
 | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **GitHub Releases** via **Publish Release**](#server-side-request-forgery-ssrf) | `server-side-request-forgery@github-actions@github-releases@github-actions>publish-release` | Medium | Mitigated | 2026-11-14 |  |  | The workflows call fixed endpoints, and harden-runner blocks egress outside an allowlist. |
 | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **GitHub Repository** via **Checkout**](#server-side-request-forgery-ssrf) | `server-side-request-forgery@github-actions@github-repo@github-actions>checkout` | Medium | Mitigated | 2026-11-14 |  |  | The workflows call fixed endpoints, and harden-runner blocks egress outside an allowlist. |
 | [**Server-Side Request Forgery (SSRF)** risk at **GitHub Actions** server-side web-requesting the target **Sigstore** via **Keyless Signing**](#server-side-request-forgery-ssrf) | `server-side-request-forgery@github-actions@sigstore@github-actions>keyless-signing` | Medium | Mitigated | 2026-11-14 |  |  | The workflows call fixed endpoints, and harden-runner blocks egress outside an allowlist. |
@@ -4196,12 +4209,12 @@ The risk rules checked **10 of 10** entries of the [OWASP Top 10:2025](https://t
 | Entry | Risk rules | Risks |
 | --- | --- | --- |
 | `A01` Broken Access Control | Confused Deputy Agent, Cross-Account Takeover, Cross-Site Request Forgery (CSRF), Kubernetes API Write Access, Missing Identity Propagation, Missing Object-Level Authorization, Overprivileged Machine Identity, [Path-Traversal](#path-traversal), Public Cloud Asset Access, [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | 1/7 unmitigated Risks |
-| `A02` Security Misconfiguration | Container Platform Escape, [Missing Cloud Hardening](#missing-cloud-hardening), [Missing Hardening](#missing-hardening), Missing Network Policy, Privileged Workload, Public Cloud Asset Access, Publicly Shared Cloud Snapshot, XML External Entity (XXE) | 5/6 unmitigated Risks |
+| `A02` Security Misconfiguration | Container Platform Escape, [Missing Cloud Hardening](#missing-cloud-hardening), [Missing Hardening](#missing-hardening), Missing Network Policy, Privileged Workload, Public Cloud Asset Access, Publicly Shared Cloud Snapshot, [Virtual Machine Escape](#virtual-machine-escape), XML External Entity (XXE) | 7/8 unmitigated Risks |
 | `A03` Software Supply Chain Failures | [Code Backdooring](#code-backdooring), Container Base Image Backdooring, [Unchecked Deployment](#unchecked-deployment) | 3/9 unmitigated Risks |
 | `A04` Cryptographic Failures | Unencrypted Communication, [Unencrypted Technical Assets](#unencrypted-technical-assets) | 3/5 unmitigated Risks |
 | `A05` Injection | Cross-Site Scripting (XSS), LDAP-Injection, SQL/NoSQL-Injection, Search-Query Injection | _no risks found_ |
 | `A06` Insecure Design | [Missing File Validation](#missing-file-validation), Missing Identity Provider Isolation, Missing Network Segmentation, Missing Vault Isolation, Mixed Targets on Shared Runtime, [Unguarded Access From Internet](#unguarded-access-from-internet), Unguarded Direct Datastore Access | 6/8 unmitigated Risks |
-| `A07` Authentication Failures | Human Use of Machine Identity, Long-Lived Credentials, [Missing Authentication](#missing-authentication), [Missing Multi-Factor Authentication (MFA)](#missing-multi-factor-authentication-mfa) | 1/2 unmitigated Risks |
+| `A07` Authentication Failures | Human Use of Machine Identity, Long-Lived Credentials, Missing Authentication, [Missing Multi-Factor Authentication (MFA)](#missing-multi-factor-authentication-mfa) | 1/1 unmitigated Risk |
 | `A08` Software or Data Integrity Failures | [Code Backdooring](#code-backdooring), Push instead of Pull Deployment, Service Registry Poisoning, [Untrusted Deserialization](#untrusted-deserialization) | 2/6 unmitigated Risks |
 | `A09` Security Logging and Alerting Failures | [Missing AI Monitoring](#missing-ai-monitoring) | 1/1 unmitigated Risk |
 | `A10` Mishandling of Exceptional Conditions | Missing Policy Decision Point Redundancy | _no risks found_ |
@@ -4213,9 +4226,9 @@ The risk rules checked **6 of 10** entries of the [OWASP API Security Top 10 202
 | Entry | Risk rules | Risks |
 | --- | --- | --- |
 | `API1` Broken Object Level Authorization | Missing Identity Propagation, Missing Object-Level Authorization | _no risks found_ |
-| `API2` Broken Authentication | [Missing Authentication](#missing-authentication), [Missing Multi-Factor Authentication (MFA)](#missing-multi-factor-authentication-mfa) | 1/2 unmitigated Risks |
+| `API2` Broken Authentication | Missing Authentication, [Missing Multi-Factor Authentication (MFA)](#missing-multi-factor-authentication-mfa) | 1/1 unmitigated Risk |
 | `API3` Broken Object Property Level Authorization | none | _not checked by any risk rule_ |
-| `API4` Unrestricted Resource Consumption | DoS-risky Access Across Trust-Boundary, Unbounded Model Consumption | _no risks found_ |
+| `API4` Unrestricted Resource Consumption | DoS-risky Access Across Trust-Boundary, [Tenant Resource Exhaustion](#tenant-resource-exhaustion), Unbounded Model Consumption | 1/1 unmitigated Risk |
 | `API5` Broken Function Level Authorization | Missing Object-Level Authorization | _no risks found_ |
 | `API6` Unrestricted Access to Sensitive Business Flows | none | _not checked by any risk rule_ |
 | `API7` Server Side Request Forgery | [Server-Side Request Forgery (SSRF)](#server-side-request-forgery-ssrf) | 1/4 unmitigated Risks |
@@ -4278,7 +4291,7 @@ The risk rules checked **6 of 10** entries of the [OWASP Non-Human Identities To
 | Entry | Risk rules | Risks |
 | --- | --- | --- |
 | `NHI1` Improper Offboarding | none | _not checked by any risk rule_ |
-| `NHI2` Secret Leakage | [Accidental Secret Leak](#accidental-secret-leak), Long-Lived Credentials, [Missing Vault (Secret Storage)](#missing-vault-secret-storage) | 3 mitigated Risks |
+| `NHI2` Secret Leakage | [Accidental Secret Leak](#accidental-secret-leak), Long-Lived Credentials, Missing Vault (Secret Storage) | 2 mitigated Risks |
 | `NHI3` Vulnerable Third-Party NHI | none | _not checked by any risk rule_ |
 | `NHI4` Insecure Authentication | none | _not checked by any risk rule_ |
 | `NHI5` Overprivileged NHI | Overprivileged Machine Identity | _no risks found_ |
@@ -4294,9 +4307,9 @@ The risk rules checked **6 of 10** entries of the [OWASP Non-Human Identities To
 | --- | --- |
 | Threagile version | 1.0.0 |
 | Threagile build timestamp |  |
-| Threagile execution timestamp | 20261114185003 |
+| Threagile execution timestamp | 20261115000954 |
 | Model filename | threagile.yaml |
-| Model hash (SHA256) | `2795a4063ee89c0f071d07e382988ef22cd2c2d1e251e6658d0f9b971f2eb326` |
+| Model hash (SHA256) | `7cced911ba084d63ae8fca0d7e28b35e91c3c7d88282763f0aef3cb84b0662e7` |
 
 Threagile (see [threagile.io](https://threagile.io) for more details) is an open-source toolkit for agile threat modeling, created by Christian Schneider ([christian-schneider.net](https://christian-schneider.net)): It allows to model an architecture with its assets in an agile fashion as a YAML file directly inside the IDE. Upon execution of the Threagile toolkit all standard risk rules (as well as individual custom rules if present) are checked against the architecture model. At the time the Threagile toolkit was executed on the model input file the following risk rules were checked:
 
@@ -4323,7 +4336,7 @@ Threagile (see [threagile.io](https://threagile.io) for more details) is an open
 | Long-Lived Credentials | `long-lived-credentials` | Spoofing | Passwords of service accounts, API keys and personal access tokens stay valid for months or for good. Once one leaks, from a repository, a log, a build system or a laptop, it lets anyone in until someone notices and rotates it. | In-scope technical assets processing or storing data rated at least as confidential or critical with an incoming communication link that is not process-local and is authenticated with _long-lived-token_, or with _credentials_ by a caller not used by humans, unless the identity of the link is _workload_. Links authenticated with _token_ are skipped, as the lifetime of the token is not modelled. | The risk rating depends on the sensitivity of the data processed or stored by the target. The attack is likely when the caller is on the internet, is used by humans or calls across a network trust boundary, where secrets leak more easily, and unlikely otherwise. |
 | Missing AI Guardrail | `missing-ai-guardrail` | Elevation of Privilege | A guardrail screens what reaches a language model or an agent, and what comes back from it, for prompt injection, jailbreaks and data that must not pass, independently of the model. Without one, the instructions of the system prompt are the only defense, and a model follows whatever content convinces it. | In-scope llm and ai-agent technical assets that untrusted content reaches (as for prompt injection) through a communication link that no guardrail screens. A link is screened when it comes from an ai-guardrail technical asset, or when the model or agent is one itself or has a link to one. Links from other language models and agents are skipped, as the rule reports a missing guardrail where the content first reaches a model. | The risk rating depends on the sensitivity of the data processed by the model or agent. The attack is likely when the model or agent talks to the internet directly, and unlikely otherwise. |
 | Missing AI Monitoring | `missing-ai-monitoring` | Repudiation | What an AI agent or a language model does depends on what it reads, so it cannot be tested in full before it runs. Without a record of its prompts, its tool calls and its answers in a monitoring system, nobody sees a prompt injection, an agent going astray or a model that drifts, nor can tell afterwards what it did. | In-scope ai-agent technical assets, and in-scope llm technical assets not on the internet (self-hosted models), with no communication link to or from a monitoring technical asset. | The risk rating depends on the sensitivity of the data processed by the agent or model. The attack is likely when the agent or model takes untrusted content, and unlikely otherwise. |
-| Missing Authentication | `missing-authentication` | Elevation of Privilege | Technical assets (especially multi-tenant systems) should authenticate incoming requests when the asset processes sensitive data. | In-scope technical assets (except load-balancer, reverse-proxy, service-registry, waf, ids, and ips and in-process calls) should authenticate incoming requests when the asset processes sensitive data. This is especially the case for all multi-tenant assets (there even non-sensitive ones). Links over industrial control protocols that cannot authenticate are left to the insecure-control-protocol rule. | The risk rating (medium or high) depends on the sensitivity of the data sent across the communication link. Monitoring callers are exempted from this risk. |
+| Missing Authentication | `missing-authentication` | Elevation of Privilege | Technical assets (especially multi-tenant systems) should authenticate incoming requests when the asset processes sensitive data. | In-scope technical assets (except load-balancer, reverse-proxy, service-registry, waf, ids, and ips and in-process calls) should authenticate incoming requests when the asset processes sensitive data. This is especially the case for all multi-tenant assets (there even non-sensitive ones). Links over industrial control protocols that cannot authenticate are left to the insecure-control-protocol rule. Read-only links that send nothing and only receive public data are exempted: anyone may read public data, and the integrity of a download is the reader's to check, by signature or checksum. | The risk rating (medium or high) depends on the sensitivity of the data sent across the communication link. Monitoring callers are exempted from this risk. |
 | Missing Multi-Factor Authentication (MFA) | `missing-authentication-second-factor` | Elevation of Privilege | Technical assets (especially multi-tenant systems) should authenticate incoming requests with multi-factor (MFA) authentication when the asset processes or stores highly sensitive data (in terms of confidentiality, integrity, and availability) and is accessed by humans. | In-scope technical assets (except load-balancer, reverse-proxy, waf, ids, and ips) should authenticate incoming requests via multi-factor authentication (MFA) when the asset processes or stores highly sensitive data (in terms of confidentiality, integrity, and availability) and is accessed by a client used by a human user. Links over industrial control protocols that cannot authenticate are left to the insecure-control-protocol rule. Process-local links (in-process calls, inter-process communication and local file access) are exempted, as they stay on the machine the user has already logged in to. | medium |
 | Missing Build Infrastructure | `missing-build-infrastructure` | Tampering | The modeled architecture does not contain a build infrastructure (devops-client, sourcecode-repo, build-pipeline, etc.), which might be the risk of a model missing critical assets (and thus not seeing their risks). If the architecture contains custom-developed parts, the pipeline where code gets developed and built needs to be part of the model. | Models with in-scope custom-developed parts missing in-scope development (code creation) and build infrastructure components (devops-client, sourcecode-repo, build-pipeline, etc.). | The risk rating depends on the highest sensitivity of the in-scope assets running custom-developed parts. |
 | Missing Cloud Hardening | `missing-cloud-hardening` | Tampering | Cloud components should be hardened according to the cloud vendor best practices. This affects their configuration, auditing, and further areas. | In-scope cloud components (either residing in cloud trust boundaries or more specifically tagged with cloud provider types). | The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed. |
@@ -4337,7 +4350,7 @@ Threagile (see [threagile.io](https://threagile.io) for more details) is an open
 | Missing Object-Level Authorization | `missing-object-level-authorization` | Elevation of Privilege | A service that acts for its users must check in each request that the user may access the object at hand, like the order or the account the request names. Checking only that the caller is logged in, or that its role may call the operation, lets any user read or change the objects of others by changing an id in the request (BOLA, also known as IDOR). | In-scope technical assets other than datastores and assets that forward requests without authenticating them (like load balancers and reverse proxies), processing or storing data rated at least as confidential or critical, with an incoming communication link whose authorization is _none_, _authenticated-only_ or _function-level_, and whose identity is _end-user_ or whose caller is used by humans. DevOps links, which administrators use by role, and links whose authorization is _unknown_ are skipped. | The risk rating depends on the sensitivity of the data processed or stored by the target, one step higher when the link has no function-level authorization either. The attack is very likely when the caller is on the internet, and likely otherwise. |
 | Missing Policy Decision Point Redundancy | `missing-policy-decision-point-redundancy` | Denial of Service | Services that externalize their authorization to a policy decision point, for example through the AuthZEN Authorization API, cannot decide a request without it. When it fails, they either deny every request and stop working, or, when they fail open, allow every request. | In-scope policy-decision-point technical assets that are not redundant and that in-scope technical assets ask for decisions through communication links that are not process-local. | The risk rating depends on the highest availability rating of the services that ask the policy decision point. |
 | Missing Safety System Independence | `missing-safety-system-independence` | Elevation of Privilege | A safety instrumented system brings the process into a safe state when the basic process control fails or is attacked. It only does so when it is independent of that control: when assets other than a dedicated safety engineering workstation can change its program, setpoints or outputs, one compromise can disable the control and the safety function together, as the TRITON attack did. | In-scope safety-controller technical assets with an incoming non-readonly communication link that is not process-local, from a technical asset other than an engineering-workstation that has no non-readonly communication links to other controllers. | The impact is very high, as the safety function protects people. The attack is very likely when the sender is on the internet, likely when it is an IT asset, reaches IT or calls across a network trust boundary, and unlikely otherwise. |
-| Missing Vault (Secret Storage) | `missing-vault` | Information Disclosure | In order to avoid the risk of secret leakage via config files (when attacked through vulnerabilities being able to read files like Path-Traversal and others), it is best practice to use a separate hardened process with proper authentication, authorization, and audit logging to access config secrets (like credentials, private keys, client certificates, etc.). This component is usually some kind of Vault. | Models without a Vault (Secret Storage). | The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed. |
+| Missing Vault (Secret Storage) | `missing-vault` | Information Disclosure | In order to avoid the risk of secret leakage via config files (when attacked through vulnerabilities being able to read files like Path-Traversal and others), it is best practice to use a separate hardened process with proper authentication, authorization, and audit logging to access config secrets (like credentials, private keys, client certificates, etc.). This component is usually some kind of Vault. | Models without a Vault (Secret Storage) and without a workload-identity provider, which issues short-lived credentials to workloads so that they need not store secrets. | The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed. |
 | Missing Vault Isolation | `missing-vault-isolation` | Elevation of Privilege | Highly sensitive vault assets and their data stores should be isolated from other assets by their own network segmentation trust-boundary (execution-environment boundaries do not count as network isolation). | In-scope vault assets when surrounded by other (not vault-related) assets (without a network trust-boundary in-between). This risk is especially prevalent when other non-vault related assets are within the same execution environment (i.e. same database or same application server). | Default is medium impact. The impact is increased to high when the asset missing the trust-boundary protection is rated as strictly-confidential or mission-critical. |
 | Missing Web Application Firewall (WAF) | `missing-waf` | Tampering | To have a first line of filtering defense, security architectures with web-services or web-applications should include a WAF in front of them. Even though a WAF is not a replacement for security (all components must be secure even without a WAF) it adds another layer of defense to the overall system by delaying some attacks and having easier attack alerting through it. | In-scope web-services and/or web-applications accessed across a network trust boundary not having a Web Application Firewall (WAF) in front of them. | The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed. |
 | Mixed Targets on Shared Runtime | `mixed-targets-on-shared-runtime` | Elevation of Privilege | Different attacker targets (like frontend and backend/datastore components) should not be running on the same shared (underlying) runtime. | Shared runtime running technical assets of different trust-boundaries is at risk. Also mixing backend/datastore with frontend components on the same shared runtime is considered a risk. | The risk rating (low or medium) depends on the confidentiality, integrity, and availability rating of the technical asset running on the shared runtime. |
@@ -4355,6 +4368,7 @@ Threagile (see [threagile.io](https://threagile.io) for more details) is an open
 | Service Registry Poisoning | `service-registry-poisoning` | Spoofing | When a service registry used for discovery of trusted service endpoints Service Registry Poisoning risks might arise. | In-scope service registries. | The risk rating depends on the sensitivity of the technical assets accessing the service registry as well as the data assets processed. |
 | Shared Machine Account | `shared-machine-account` | Elevation of Privilege | Several technical assets that call others with one service account, API key or workload identity share all of its permissions: each can do what any of them needs, and the targets cannot tell them apart. | In-scope technical assets with a communication link naming an _account_ that communication links of other technical assets name as well, with the identity _service-account_ or _workload_. Links that name no account are skipped. | The risk rating depends on the sensitivity of the data processed or stored by the targets of all links of the account. The attack is likely when the callers are in different trust boundaries, so that the compromise of one crosses into others, and unlikely otherwise. |
 | SQL/NoSQL-Injection | `sql-nosql-injection` | Tampering | When a database is accessed via database access protocols SQL/NoSQL-Injection risks might arise. The risk rating depends on the sensitivity technical asset itself and of the data assets processed. | In-scope datastores accessed via typical database access protocols, and databases accessed via HTTP or binary protocols as well (like NoSQL databases with a REST interface). | The risk rating depends on the sensitivity of the data stored inside the database. |
+| Tenant Resource Exhaustion | `tenant-resource-exhaustion` | Denial of Service | A multi-tenant asset shares its connections, queues, memory and processing time among its tenants. A tenant that sends more than its share, by mistake or on purpose, takes them from the others. For a collector of logs, events or audit records this does more than slow it down: the records of the other tenants are dropped, and whoever reads them can no longer tell a quiet tenant from one that was not heard. | In-scope multi-tenant technical assets that receive data over a communication link from a caller that is out of scope or in another trust boundary, of any type. Read-only links, which send no data, and links of devops usage are left out. | Likely. The impact follows the higher of the availability of the asset and the integrity of the data it receives over the link: low below critical, medium for critical and high for mission-critical. |
 | Unauthenticated MCP Server | `unauthenticated-mcp-server` | Spoofing | An MCP server, or another server exposing tools to AI agents, acts on the systems behind its tools with its own permissions. When it does not authenticate its callers, anyone who can reach it can call those tools, and it cannot tell one agent or user from another to limit what each may do. | In-scope mcp-server technical assets with an incoming communication link without authentication that is not process-local, whose tools (the outgoing communication links) reach technical assets processing or storing data rated at least as confidential or critical. | The risk rating depends on the sensitivity of the technical assets the tools reach. The attack is very likely when the caller is on the internet, likely when it takes untrusted input or sits across a network trust boundary, and unlikely otherwise. |
 | Unbounded Model Consumption | `unbounded-model-consumption` | Denial of Service | Every request to a language model or an agent costs compute and tokens, and an agent can turn one request into many model calls. Users who reach a model or an agent without a gateway that limits their requests and tokens can exhaust its capacity, or the budget of a model paid for by use. | In-scope llm and ai-agent technical assets that users reach, from the internet or from clients used by humans, through communication links that pass no gateway technical asset. An agent that calls all its language models through a gateway technical asset is skipped, as the gateway can limit its tokens. | The risk rating depends on the availability rating of the data processed by the model or agent, at least medium for the costs. The attack is very likely when users on the internet reach it, and likely otherwise. |
 | Unchecked Deployment | `unchecked-deployment` | Tampering | For each build-pipeline component Unchecked Deployment risks might arise when the build-pipeline does not include established DevSecOps best-practices. DevSecOps best-practices scan as part of CI/CD pipelines for vulnerabilities in source- or byte-code, dependencies, container layers, and dynamically against running test systems. There are several open-source and commercial tools existing in the categories DAST, SAST, and IAST. | All development-relevant technical assets. | The risk rating depends on the highest rating of the technical assets and data assets processed by deployment-receiving targets. |
@@ -4370,6 +4384,7 @@ Threagile (see [threagile.io](https://threagile.io) for more details) is an open
 | Unsandboxed Code Execution | `unsandboxed-code-execution` | Elevation of Privilege | A code interpreter runs the code that a language model or an AI agent writes. When untrusted content reaches the model, a prompt injection decides what that code does, and the code can do whatever the interpreter can reach: the systems it has links to, the internet, and the other assets of the runtime it shares, or all of the agent when it runs inside it. | In-scope code-interpreter technical assets that a language model or an AI agent taking untrusted content (as for prompt injection) sends code to, or that are such a model or agent themselves, when the code can reach data rated at least as confidential or critical: through a link of the interpreter, in an asset of a shared runtime it runs in, by sending what it processes to an internet asset, or, inside an agent, through what the agent processes and can change. | The risk rating depends on the most sensitive data the code can reach. The attack is very likely when the model or agent writing the code talks to the internet directly, and likely otherwise. |
 | Untrusted Deserialization | `untrusted-deserialization` | Tampering | When a technical asset accepts data in a specific serialized form (like Java or .NET serialization), Untrusted Deserialization risks might arise. | In-scope technical assets accepting serialization data formats (including EJB and RMI protocols). | The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed. |
 | Vector Store Poisoning | `vector-store-poisoning` | Tampering | Language models and agents answer and act on what they retrieve from vector stores, for retrieval-augmented generation (RAG) or as the memory of an agent. Whoever can write into the store decides what the model believes: a poisoned document or memory entry carries false facts or hidden instructions into every answer that retrieves it, long after it was written. | In-scope vector-database technical assets that an llm or ai-agent technical asset communicates with. | The risk rating depends on the sensitivity of the data processed by the models and agents that use the store. The attack is likely when the store is written by an asset that takes untrusted input or sits across a network trust boundary, and unlikely otherwise. |
+| Virtual Machine Escape | `virtual-machine-escape` | Elevation of Privilege | A hypervisor isolates its guests from its host and from each other, and sandboxes like Kata Containers or Firecracker rely on that to run untrusted code. Code that exploits a vulnerability of the hypervisor or of the devices it emulates escapes its virtual machine and runs on the host, with the privileges of the hypervisor, next to the host's own services and every other guest. | Technical assets of the technology hypervisor. Their host is the trust boundary that holds them and their guests are the technical assets of the trust boundaries nested in it. An in-scope hypervisor gets the risk. For an out-of-scope one, like the hypervisor of a cloud or a sandbox runtime, each in-scope technical asset of its host gets it, since those are what an escape reaches. | Escapes are unlikely. The impact is high when a technical asset of the host or of its guests processes strictly-confidential or mission-critical data, and medium otherwise. |
 | Wrong Communication Link Content | `wrong-communication-link-content` | Information Disclosure | When a communication link is defined as readonly, but does not receive any data asset, or when it is defined as not readonly, but does not send any data asset, it is likely to be a model failure. | Communication links with inconsistent data assets being sent/received not matching their readonly flag or otherwise inconsistent protocols not matching the target technology type. | low |
 | Wrong Trust Boundary Content | `wrong-trust-boundary-content` | Elevation of Privilege | When a trust boundary of type network-policy-namespace-isolation contains non-container assets it is likely to be a model failure. | Trust boundaries which should only contain containers, but have different assets inside. | low |
 | XML External Entity (XXE) | `xml-external-entity` | Information Disclosure | When a technical asset accepts data in XML format, XML External Entity (XXE) risks might arise. | In-scope technical assets accepting XML data formats. | The risk rating depends on the sensitivity of the technical asset itself and of the data assets processed. Also for cloud-based environments the exploitation impact is at least medium, as cloud backend services can be attacked via SSRF (and XXE vulnerabilities are often also SSRF vulnerabilities). |
@@ -4412,4 +4427,4 @@ In this particular project, a time box approach was used to define the analysis 
 
 Distribution of this report (in full or in part like diagrams or risk findings) requires that this disclaimer as well as the chapter about the Threagile toolkit and method used is kept intact as part of the distributed report or referenced from the distributed parts.
 
-_Generated by Threagile 1.0.0 on 2026-11-14T18:50:03+01:00._
+_Generated by Threagile 1.0.0 on 2026-11-15T00:09:54+01:00._

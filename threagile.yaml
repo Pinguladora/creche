@@ -455,7 +455,7 @@ technical_assets:
     out_of_scope: true
     justification_out_of_scope: Part of the cluster's SPIRE deployment
     size: service
-    technologies: [identity-provider]
+    technologies: [workload-identity]
     tags: []
     internet: false
     machine: virtual
@@ -1172,11 +1172,6 @@ risk_tracking:
     justification: The sink writes to stdout only. The operator's redirect names the file, and no path comes from the guest.
     date: 2026-11-14
 
-  missing-vault@creche-sink:
-    status: mitigated
-    justification: The SVID comes from the SPIFFE Workload API, and each stream's signing key lives in memory only and is erased once the next key is derived (ADR 0014).
-    date: 2026-11-14
-
   wrong-communication-link-content@creche-observer@creche-observer>ring-buffer:
     status: false-positive
     justification: The observer writes its own pid and port into the programs before they load, configuration rather than a data asset.
@@ -1230,11 +1225,6 @@ risk_tracking:
     date: 2026-11-14
 
   # Build and release
-
-  missing-authentication@image-builder>download-release@image-builder@github-releases:
-    status: mitigated
-    justification: Releases are public. Integrity comes from sha256sum, cosign verify-blob pinned to the release workflow's identity and slsa-verifier (README, Releases).
-    date: 2026-11-14
 
   unguarded-access-from-internet@github-releases@github-actions@github-actions>publish-release:
     status: accepted
