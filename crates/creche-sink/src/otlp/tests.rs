@@ -103,6 +103,11 @@ fn endpoints_default_their_port_and_path() {
         "http:///v1/logs",
         "http://user@otel",
         "grpc://otel",
+        // Copied into the request head, so a line break would split it.
+        "http://otel:4318/v1/logs\r\nX-Injected: 1",
+        "http://otel\r\nX-Injected: 1",
+        "http://otel/v1/logs\tx",
+        "http://otel/v1/l\u{f6}gs",
     ] {
         assert!(parse(url, Protocol::Grpc).is_err(), "{url}");
     }
