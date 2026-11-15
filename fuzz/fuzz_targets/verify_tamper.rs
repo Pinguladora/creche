@@ -5,26 +5,12 @@
 //! so edits that leave none of it are skipped.
 #![no_main]
 
+use creche_fuzz::archive;
 use creche_sink::audit::verify;
-use creche_sink::json::Origin;
-use creche_sink::stream::{Format, StreamDecoder};
 use libfuzzer_sys::fuzz_target;
 
 /// Bytes at the start of the input that choose the edit.
 const EDIT: usize = 8;
-
-/// The archive a sink writes for one stream of `records`.
-fn archive(records: &[u8]) -> Vec<u8> {
-    let origin = Origin::from("sb").with_stream("s1");
-    let mut decoder = StreamDecoder::new(Format::Json).with_audit();
-    let mut out = Vec::new();
-    decoder.event(&origin, "creche.stream.start", 1, &[], &mut out);
-    // A corrupt stream still ends, as the sink ends it.
-    let _ = decoder.feed_at(records, &origin, 2, &mut out);
-    decoder.event(&origin, "creche.stream.end", 3, &[], &mut out);
-    decoder.finish(&origin, 3, &mut out);
-    out
-}
 
 fn is_checkpoint(line: &[u8]) -> bool {
     line.windows(25)

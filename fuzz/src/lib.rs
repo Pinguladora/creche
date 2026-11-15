@@ -1,9 +1,26 @@
-//! Checks shared by the fuzz targets.
+//! Checks and fixtures shared by the fuzz targets and their seeds.
 
 use std::collections::HashSet;
 use std::fmt;
 
+use creche_sink::json::Origin;
+use creche_sink::stream::{Format, StreamDecoder};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+
+/// The archive a sink writes for one stream of `records`: its start line, the
+/// records' lines, its end line and its checkpoints. A corrupt stream still
+/// ends, as the sink ends it.
+#[must_use]
+pub fn archive(records: &[u8]) -> Vec<u8> {
+    let origin = Origin::from("sb").with_stream("s1");
+    let mut decoder = StreamDecoder::new(Format::Json).with_audit();
+    let mut out = Vec::new();
+    decoder.event(&origin, "creche.stream.start", 1, &[], &mut out);
+    let _ = decoder.feed_at(records, &origin, 2, &mut out);
+    decoder.event(&origin, "creche.stream.end", 3, &[], &mut out);
+    decoder.finish(&origin, 3, &mut out);
+    out
+}
 
 /// Whether `json` is one JSON value in which no object names a member twice,
 /// at any depth. `serde_json` keeps the last of repeated names, so parsing
