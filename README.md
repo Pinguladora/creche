@@ -196,9 +196,12 @@ the pipelines they already feed.
   `creche.audit.hash = SHA-256(creche.audit.prev || the exact bytes of those lines)`,
   starting from 32 zero bytes. A missing line shows as a gap in `creche.seq`, a
   changed one as a mismatched hash. `creche-sink --verify FILE` checks saved
-  output. Refused connections are `creche.sink.refused` lines, outside any stream,
-  with the peer and `creche.sink.refusal`. The chain proves integrity only as far
-  as its checkpoints are kept out of reach, for example shipped to a second store.
+  output. It exits with 1 when a stream does not add up, and with 3 when all do
+  but one has no end line. Lines after that stream's last checkpoint may then be
+  missing with no trace, or its sink stopped before the stream ended. Refused
+  connections are `creche.sink.refused` lines, outside any stream, with the peer
+  and `creche.sink.refusal`. The chain proves integrity only as far as its
+  checkpoints are kept out of reach, for example shipped to a second store.
 - **Signed streams** (`--spiffe-socket PATH`): the sink takes its X.509-SVID from
   the SPIFFE Workload API. Each stream starts with a fresh P-256 key whose public
   half (`creche.audit.key`) the SVID signs (`creche.audit.key_sig`, with the SVID
