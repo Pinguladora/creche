@@ -196,22 +196,7 @@ fn run(args: &Args) -> Result<()> {
         while let Some(record) = probes.events.next() {
             drained = true;
             if !args.discard {
-                // A cgroup the host has not heard of on this connection is
-                // described first, so its path and labels apply from the
-                // record that names it.
-                //
-                // A refused record is counted as dropped, and the heartbeat
-                // reports it. Then cgroups are described again from the next
-                // batch on.
-                let id = peek_cgroup_id(&record);
-                let described = id.and_then(|id| cgroups.describe(id, pid, metrics::boottime_ns()));
-                let queued = match described {
-                    Some(description) => queue.push_pair(description, &record),
-                    None => queue.push(&record),
-                };
-                if !queued && let Some(id) = id {
-                    cgroups.retract(id);
-                }
+                forward(&mut queue, &mut cgroups, &record, pid);
             }
         }
         if Instant::now() >= next_beat {
@@ -244,6 +229,29 @@ fn run(args: &Args) -> Result<()> {
             dropped = queue.dropped_bytes();
             cgroups.forget();
             probes.resync_tasks()?;
+        }
+    }
+}
+
+/// Queues `record` from the ring buffer for the host, after a description of
+/// its cgroup when the host has not heard of it on this connection, so the
+/// cgroup's path and labels apply from the record that names it.
+///
+/// A refused record is counted as dropped, and the heartbeat reports it. Then
+/// cgroups are described again from the next batch on. A description refused
+/// with its record is sent again with the cgroup's next record.
+fn forward(queue: &mut RecordQueue, cgroups: &mut Cgroups, record: &[u8], pid: u32) {
+    let id = peek_cgroup_id(record);
+    match id.and_then(|id| cgroups.describe(id, pid, metrics::boottime_ns())) {
+        Some(description) => {
+            if !queue.push_pair(description, record)
+                && let Some(id) = id
+            {
+                cgroups.retract(id);
+            }
+        }
+        None => {
+            let _counted = queue.push(record);
         }
     }
 }
