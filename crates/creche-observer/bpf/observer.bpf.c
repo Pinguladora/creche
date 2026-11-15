@@ -120,10 +120,14 @@ struct {
 	__type(value, __u32);
 } epoch SEC(".maps");
 
+/* A file as its path names it: a dentry under a mount. A hard link or a bind
+ * mount of the same inode is another path, so opening one does not hide an open
+ * of the other. */
 struct dedup_key {
 	__u32 tgid;
 	__u32 pad;
-	__u64 inode;
+	__u64 mnt;
+	__u64 dentry;
 };
 
 struct {
@@ -435,12 +439,13 @@ static __always_inline int noise(struct file *f)
 	return 0;
 }
 
-/* Repeated opens of the same file by the same process within the window. */
+/* Repeated opens of the same path by the same process within the window. */
 static __always_inline int duplicate(struct file *f)
 {
 	struct dedup_key k = {
 		.tgid = bpf_get_current_pid_tgid() >> 32,
-		.inode = (__u64)f->f_inode,
+		.mnt = (__u64)f->f_path.mnt,
+		.dentry = (__u64)f->f_path.dentry,
 	};
 	__u64 now = bpf_ktime_get_boot_ns(), *last;
 
