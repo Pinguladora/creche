@@ -12,6 +12,10 @@ use std::io::{self, Write};
 
 use creche_wire::peek_len;
 
+/// Bytes past the capacity kept for records about the observer itself, room
+/// for several heartbeats while the host is not reading.
+pub const CONTROL_ROOM: usize = 1024;
+
 /// Records waiting to be sent, as one contiguous byte buffer.
 #[derive(Debug)]
 pub struct RecordQueue {
@@ -42,6 +46,7 @@ impl RecordQueue {
 
     /// Queues a whole record. Returns `false` (and counts it as dropped) when
     /// the record does not fit or its header length is not its actual length.
+    #[must_use]
     pub fn push(&mut self, record: &[u8]) -> bool {
         if peek_len(record) != Some(record.len())
             || self.queued_bytes().saturating_add(record.len()) > self.capacity
@@ -51,6 +56,46 @@ impl RecordQueue {
         }
         append(&mut self.buf, record);
         true
+    }
+
+    /// Queues `first` and `second` together, or neither, as [`Self::push`]
+    /// would. A record that explains the next, such as a cgroup description,
+    /// then never arrives without it, nor it without its explanation.
+    #[must_use]
+    pub fn push_pair(&mut self, first: &[u8], second: &[u8]) -> bool {
+        let len = first.len().saturating_add(second.len());
+        if peek_len(first) != Some(first.len())
+            || peek_len(second) != Some(second.len())
+            || self.queued_bytes().saturating_add(len) > self.capacity
+        {
+            self.dropped_bytes = self.dropped_bytes.saturating_add(len as u64);
+            return false;
+        }
+        append(&mut self.buf, first);
+        append(&mut self.buf, second);
+        true
+    }
+
+    /// Queues a record about the observer itself, such as a heartbeat. It may
+    /// go up to [`CONTROL_ROOM`] bytes past the capacity, so a queue that
+    /// events keep full still reports what it dropped.
+    #[must_use]
+    pub fn push_control(&mut self, record: &[u8]) -> bool {
+        let limit = self.capacity.saturating_add(CONTROL_ROOM);
+        if peek_len(record) != Some(record.len())
+            || self.queued_bytes().saturating_add(record.len()) > limit
+        {
+            self.dropped_bytes = self.dropped_bytes.saturating_add(record.len() as u64);
+            return false;
+        }
+        append(&mut self.buf, record);
+        true
+    }
+
+    /// Whether `len` more bytes fit, without counting anything as dropped.
+    #[must_use]
+    pub fn fits(&self, len: usize) -> bool {
+        self.queued_bytes().saturating_add(len) <= self.capacity
     }
 
     /// Unsent bytes, including any partially sent record.
@@ -120,6 +165,11 @@ impl RecordQueue {
 /// vector moves. A copy of runtime length calls the C library's memcpy, and musl's
 /// moves small unaligned buffers a byte at a time: it was the observer's hottest
 /// userspace path, about 3 times slower than this for typical records.
+#[expect(
+    clippy::inline_always,
+    reason = "with four callers it was no longer inlined into push, which made pushes 7% slower"
+)]
+#[inline(always)]
 fn append(buf: &mut Vec<u8>, record: &[u8]) {
     let Some(last) = record.last_chunk::<16>() else {
         buf.extend_from_slice(record);
@@ -205,6 +255,54 @@ mod tests {
     }
 
     #[test]
+    fn pairs_are_queued_together_or_not_at_all() {
+        let mut q = RecordQueue::new(112);
+        assert!(q.push_pair(&rec(40, 1), &rec(40, 2)));
+        // 32 bytes left: the first would fit alone, the pair does not.
+        assert!(!q.push_pair(&rec(20, 3), &rec(20, 4)));
+        assert_eq!((q.queued_bytes(), q.dropped_bytes()), (80, 40));
+        let mut bad = rec(16, 5);
+        bad.truncate(15);
+        assert!(!q.push_pair(&rec(16, 6), &bad));
+        assert!(!q.push_pair(&bad, &rec(16, 6)));
+        assert!(q.push_pair(&rec(16, 7), &rec(16, 8)));
+        assert_eq!(q.queued_bytes(), 112);
+        let mut out = writer(1024);
+        q.flush(&mut out).unwrap();
+        assert_eq!(
+            out.written,
+            [rec(40, 1), rec(40, 2), rec(16, 7), rec(16, 8)].concat()
+        );
+    }
+
+    #[test]
+    fn fitting_is_asked_without_dropping() {
+        let mut q = RecordQueue::new(100);
+        assert!(q.push(&rec(60, 1)));
+        assert!(q.fits(40));
+        assert!(!q.fits(41));
+        assert_eq!(q.dropped_bytes(), 0);
+    }
+
+    #[test]
+    fn heartbeats_fit_past_a_queue_events_keep_full() {
+        let mut q = RecordQueue::new(100);
+        assert!(q.push(&rec(100, 1)));
+        assert!(!q.push(&rec(16, 2)));
+        assert!(q.push_control(&rec(64, 3)));
+        assert_eq!(q.queued_bytes(), 164);
+        // Events still stop at the capacity, control records at its room.
+        assert!(!q.push(&rec(16, 4)));
+        let beats = (CONTROL_ROOM - 64) / 64;
+        for _ in 0..beats {
+            assert!(q.push_control(&rec(64, 5)));
+        }
+        assert!(!q.push_control(&rec(64, 6)));
+        assert!(!q.push_control(&rec(15, 6)[..14]));
+        assert_eq!(q.dropped_bytes(), 16 + 16 + 64 + 14);
+    }
+
+    #[test]
     fn refuses_records_whose_header_length_is_wrong() {
         let mut q = RecordQueue::new(1024);
         let mut short = rec(60, 1);
@@ -220,8 +318,8 @@ mod tests {
     fn a_failed_write_resends_the_partial_record_whole() {
         let (first, second) = (rec(50, 1), rec(60, 2));
         let mut q = RecordQueue::new(1024);
-        q.push(&first);
-        q.push(&second);
+        assert!(q.push(&first));
+        assert!(q.push(&second));
         // 2 calls of 40 bytes: all of first and 30 bytes of second, then fail.
         let mut out = Flaky {
             chunk: 40,
@@ -244,7 +342,7 @@ mod tests {
     fn write_zero_is_an_error_and_keeps_the_record() {
         let r = rec(48, 1);
         let mut q = RecordQueue::new(1024);
-        q.push(&r);
+        assert!(q.push(&r));
         let mut stuck = writer(0);
         assert_eq!(
             q.flush(&mut stuck).unwrap_err().kind(),
@@ -274,7 +372,7 @@ mod tests {
         }
         let r = rec(48, 1);
         let mut q = RecordQueue::new(64);
-        q.push(&r);
+        assert!(q.push(&r));
         let mut out = InterruptOnce(false, Vec::new());
         q.flush(&mut out).unwrap();
         assert_eq!(out.1, r);
@@ -284,7 +382,7 @@ mod tests {
     fn partly_sent(count: usize, sent: usize) -> RecordQueue {
         let mut q = RecordQueue::new(1024);
         for _ in 0..count {
-            q.push(&rec(50, 7));
+            assert!(q.push(&rec(50, 7)));
         }
         let mut out = Flaky {
             chunk: sent,
@@ -314,7 +412,7 @@ mod tests {
     #[test]
     fn space_is_reclaimed_after_sending() {
         let mut q = RecordQueue::new(64);
-        q.push(&rec(64, 1));
+        assert!(q.push(&rec(64, 1)));
         q.flush(&mut writer(64)).unwrap();
         assert!(q.push(&rec(64, 2)));
         assert_eq!(q.queued_bytes(), 64);

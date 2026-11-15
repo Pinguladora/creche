@@ -118,6 +118,9 @@ fn annotations(bundles: &Path, id: &str) -> Result<BTreeMap<String, String>, Unr
         return Err(Unresolved::Untrusted);
     }
     let mut text = String::new();
+    // Only a trusted user can write in the private bundle directory checked
+    // above, so nobody else can swap the spec for a link before it is opened.
+    // nosemgrep: host-follows-a-path
     fs::File::open(&spec)
         .and_then(|f| {
             f.take(MAX_SPEC_LEN.saturating_add(1))

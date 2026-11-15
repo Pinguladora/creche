@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::Path;
 
+use creche_fuzz::archive;
 use creche_wire::{
     ARGS_LEN, CGROUP_LEN, CGROUP_PATH_LEN, Header, Kind, LABEL_KEY_LEN, LABEL_VALUE_LEN,
     MAX_LABELS, MAX_RECORD_LEN, PATH_LEN, encode_cgroup, sample,
@@ -76,6 +77,20 @@ fn main() {
     ];
 
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    // verify_tamper reads its edit from the first 8 bytes, verify_report an
+    // archive the sink wrote.
+    for (target, prefix) in [("verify_tamper", &[1_u8, 9, 0, 2, 5, 1, 0, 0][..])] {
+        let dir = corpus.join(target);
+        fs::create_dir_all(&dir).unwrap();
+        for (i, seed) in seeds.iter().enumerate() {
+            fs::write(dir.join(format!("seed-{i}")), [prefix, seed].concat()).unwrap();
+        }
+    }
+    let dir = corpus.join("verify_report");
+    fs::create_dir_all(&dir).unwrap();
+    for (i, seed) in seeds.iter().enumerate() {
+        fs::write(dir.join(format!("seed-{i}")), archive(seed)).unwrap();
+    }
     for target in ["decode", "sink_stream"] {
         let dir = corpus.join(target);
         fs::create_dir_all(&dir).unwrap();

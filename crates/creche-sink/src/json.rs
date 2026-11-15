@@ -194,7 +194,8 @@ pub fn sink_event(
 }
 
 /// Appends `record`, from `origin`, to `out` as one JSON object and a newline.
-/// `task` is the context of the record's process, when the stream reported it.
+/// `task` is the context of the record's process, when the stream reported it,
+/// and `cgroup` the description of its cgroup, when the observer sent one.
 /// `observed_ns` is the host's wall clock when the record arrived, in nanoseconds
 /// since the Unix epoch: the guest only knows its own boot-time clock.
 ///
@@ -206,6 +207,27 @@ pub fn render(
     origin: &Origin,
     record: &Record<'_>,
     task: Option<&TaskInfo>,
+    cgroup: Option<&Cgroup>,
+    observed_ns: u64,
+    seq: u64,
+    out: &mut Vec<u8>,
+) {
+    render_judged(origin, record, task, cgroup, None, observed_ns, seq, out);
+}
+
+/// [`render`], with the sink's verdict on a hello's guard claim (see
+/// [`crate::guard`]) when it has one. A hello whose claim the sink does not take
+/// says `creche.observer.guarded: false` and `creche.observer.guard_claimed: true`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "render's arguments plus the verdict, all needed per line"
+)]
+pub fn render_judged(
+    origin: &Origin,
+    record: &Record<'_>,
+    task: Option<&TaskInfo>,
+    cgroup: Option<&Cgroup>,
+    guarded: Option<bool>,
     observed_ns: u64,
     seq: u64,
     out: &mut Vec<u8>,
@@ -223,10 +245,16 @@ pub fn render(
         line.str(key!("process.executable.name"), &t.comm);
         line.num(key!("creche.cgroup.id"), t.cgroup_id);
         line.str(key!("creche.cgroup.name"), &t.cgroup);
-        if let Some(c) = &t.cgroup_info {
+        if let Some(c) = cgroup {
             line.out.extend_from_slice(&c.json);
         }
-        if let Some(c) = &t.container {
+        // The container was confirmed for the cgroup as described when the
+        // process entered it. One described again since under another
+        // container's path no longer goes with it.
+        let container = t.container.as_ref().filter(|c| {
+            cgroup.is_none_or(|g| crate::k8s::claimed_id(g.container_scope()) == Some(&*c.id))
+        });
+        if let Some(c) = container {
             line.str(key!("creche.guest.container.id"), &c.id);
             line.str(key!("creche.guest.container.name"), &c.name);
         }
@@ -265,11 +293,15 @@ pub fn render(
         Body::Hello { version, flags } => {
             line.num(key!("creche.wire.version"), version);
             line.num(key!("creche.observer.flags"), flags.bits());
-            let guarded = flags.contains(HelloFlags::GUARDED);
+            let claimed = flags.contains(HelloFlags::GUARDED);
+            let guarded = guarded.unwrap_or(claimed);
             line.raw(
                 key!("creche.observer.guarded"),
                 if guarded { "true" } else { "false" },
             );
+            if claimed && !guarded {
+                line.raw(key!("creche.observer.guard_claimed"), "true");
+            }
         }
         Body::Heartbeat(hb) => {
             line.num(key!("creche.observer.ringbuf_drops"), hb.ringbuf_drops);
@@ -495,7 +527,6 @@ mod tests {
             comm: "wget".into(),
             cgroup: "cri-containerd-x.scope".into(),
             container: None,
-            cgroup_info: None,
         }
     }
 
@@ -508,6 +539,7 @@ mod tests {
                 body,
             },
             task,
+            None,
             42,
             0,
             &mut out,
@@ -717,6 +749,7 @@ mod tests {
                 body: Body::Unknown { body: b"abc" },
             },
             None,
+            None,
             42,
             0,
             &mut out,
@@ -833,6 +866,7 @@ mod tests {
                 body: Body::Fork { ppid: 1 },
             },
             None,
+            None,
             42,
             0,
             &mut out,
@@ -876,6 +910,7 @@ mod tests {
                 header: header(Kind::Fork),
                 body: Body::Fork { ppid: 1 },
             },
+            None,
             None,
             42,
             0,

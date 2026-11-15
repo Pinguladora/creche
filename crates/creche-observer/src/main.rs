@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use creche_wire::{
-    HEARTBEAT_LEN, HELLO_LEN, Header, HeartbeatRecord, HelloFlags, HelloRecord, Kind, VERSION,
-    peek_cgroup_id,
+    HEARTBEAT_LEN, HELLO_LEN, Header, HeartbeatRecord, HelloFlags, HelloRecord, Kind,
+    MAX_RECORD_LEN, VERSION, peek_cgroup_id,
 };
 use nix::errno::Errno;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
@@ -45,7 +45,7 @@ usage: creche-observer [-p PORT] [-s] [-S] [-d]
   -p, --port PORT  vsock port on the host (default 7000)
   -s, --stdout     write the record stream to stdout instead of vsock
   -S, --stats      enable kernel BPF run-time stats (reported in heartbeats)
-  -d, --dedup      collapse repeated opens of a file by the same process (1 s window)
+  -d, --dedup      collapse repeated opens of a path by the same process (1 s window)
   -b, --batch-ms MS  drain at most once per MS milliseconds (default 20)
 Overhead breakdown only:
   --stage STAGE    attach (programs return at once), logic (no ring buffer output) or full
@@ -179,7 +179,7 @@ fn run(args: &Args) -> Result<()> {
         // drained in between, that record would wait for the heartbeat, so
         // after a drain that found records, sleep at most one more window.
         let mut wait = next_beat.saturating_duration_since(Instant::now());
-        if drained {
+        if drained || (cgroups.deferring() && queue.fits(MAX_RECORD_LEN)) {
             wait = wait.min(args.batch_window);
         }
         let timeout = EpollTimeout::try_from(wait).unwrap_or(EpollTimeout::NONE);
@@ -196,16 +196,11 @@ fn run(args: &Args) -> Result<()> {
         while let Some(record) = probes.events.next() {
             drained = true;
             if !args.discard {
-                // A cgroup the host has not heard of on this connection is
-                // described first, so its path and labels apply from the
-                // record that names it.
-                let described = peek_cgroup_id(&record)
-                    .and_then(|id| cgroups.describe(id, pid, metrics::boottime_ns()));
-                if let Some(description) = described {
-                    queue.push(description);
-                }
-                queue.push(&record);
+                forward(&mut queue, &mut cgroups, &record, pid);
             }
+        }
+        if !args.discard {
+            forward_deferred(&mut queue, &mut cgroups, pid);
         }
         if Instant::now() >= next_beat {
             next_beat += BEAT;
@@ -225,7 +220,11 @@ fn run(args: &Args) -> Result<()> {
                 bpf_run_ns,
                 bpf_run_cnt,
             };
-            queue.push(heartbeat.as_bytes());
+            // Past a queue that events keep full, so drops are still
+            // reported. When even that is refused, it is counted, and the
+            // next beat reports it. The beat is not retried sooner: that
+            // would wake the loop at once until the host reads.
+            let _counted = queue.push_control(heartbeat.as_bytes());
         }
         let reconnected = output.send(&mut queue, || hello(probes.guarded()).as_bytes().to_vec());
         // Records may have been lost, task and cgroup records among them.
@@ -234,5 +233,52 @@ fn run(args: &Args) -> Result<()> {
             cgroups.forget();
             probes.resync_tasks()?;
         }
+    }
+}
+
+/// Queues `record` from the ring buffer for the host, after a description of
+/// its cgroup when the host has not heard of it on this connection, so the
+/// cgroup's path and labels apply from the record that names it.
+///
+/// A refused record is counted as dropped, and the heartbeat reports it. Then
+/// cgroups are described again from the next batch on. A description refused
+/// with its record is sent again with the cgroup's next record.
+fn forward(queue: &mut RecordQueue, cgroups: &mut Cgroups, record: &[u8], pid: u32) {
+    let id = peek_cgroup_id(record);
+    match id.and_then(|id| cgroups.describe(id, pid, metrics::boottime_ns())) {
+        Some(description) => {
+            if !queue.push_pair(description, record)
+                && let Some(id) = id
+            {
+                cgroups.retract(id);
+            }
+        }
+        None => {
+            let _counted = queue.push(record);
+        }
+    }
+}
+
+/// Queues the descriptions of cgroups whose walk had to wait, once it may run.
+/// Lines from then on carry their paths and labels, though no record named them
+/// again. While the queue has no room they keep waiting, not counted as lost.
+fn forward_deferred(queue: &mut RecordQueue, cgroups: &mut Cgroups, pid: u32) {
+    if !queue.fits(MAX_RECORD_LEN) {
+        return;
+    }
+    let now = metrics::boottime_ns();
+    let mut ready = cgroups.take_ready(now).into_iter();
+    for id in ready.by_ref() {
+        if let Some(description) = cgroups.describe(id, pid, now) {
+            if !queue.fits(description.len()) {
+                cgroups.retract(id);
+                break;
+            }
+            let _counted = queue.push(description);
+        }
+    }
+    // What was not reached waits again, as it was.
+    for id in ready {
+        cgroups.defer(id);
     }
 }

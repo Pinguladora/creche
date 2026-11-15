@@ -67,6 +67,16 @@ local pre_push = new Mapping<String, Step> {
             effect = "read"
         }
     }
+    // The project's own rules (opengrep/creche.yaml), on the whole tree, so a
+    // change to the rules is checked too.
+    ["opengrep"] {
+        glob = List("**/*.rs", "opengrep/*")
+        batch = true
+        check = new CommandSpec {
+            command = "mise run lint:opengrep"
+            effect = "read"
+        }
+    }
     // One run for the whole workspace: per-member runs would update the shared
     // advisory database concurrently and collide on its git lock.
     ["cargo-deny"] = (Builtins.cargo_deny) { workspace_indicator = "deny.toml" }

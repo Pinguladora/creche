@@ -473,7 +473,10 @@ fn cgroup_records_carry_path_owner_and_labels() {
 #[test]
 fn cgroup_records_refuse_what_they_cannot_carry() {
     let long_value = [b'v'; LABEL_VALUE_LEN + 1];
-    let too_many: Vec<(&[u8], &[u8])> = (0..=MAX_LABELS).map(|_| (&b"k"[..], &b"v"[..])).collect();
+    let keys: Vec<[u8; 2]> = (0..=MAX_LABELS)
+        .map(|i| [b'k', b'0' + u8::try_from(i).unwrap()])
+        .collect();
+    let too_many: Vec<(&[u8], &[u8])> = keys.iter().map(|k| (&k[..], &b"v"[..])).collect();
     for (path, labels) in [
         (&[b'p'; CGROUP_PATH_LEN + 1][..], vec![]),
         (&b"/a\0b"[..], vec![]),
@@ -484,6 +487,13 @@ fn cgroup_records_refuse_what_they_cannot_carry() {
         (&b"/"[..], vec![(&b"a"[..], &b"\xff"[..])]),
         (&b"/"[..], vec![(&b"a"[..], &long_value[..])]),
         (&b"/"[..], too_many),
+        (
+            &b"/"[..],
+            vec![
+                (&b"role"[..], &b"viewer"[..]),
+                (&b"role"[..], &b"admin"[..]),
+            ],
+        ),
     ] {
         assert_eq!(cgroup(path, &labels), None, "{path:?} {labels:?}");
     }
@@ -500,6 +510,32 @@ fn cgroup_records_refuse_what_they_cannot_carry() {
         encode_cgroup(1, 1, 1, 1, b"/a/long/path", &[], &mut short),
         None
     );
+}
+
+#[test]
+fn the_longest_labels_fill_labels_len_and_the_shortest_record_decodes() {
+    let keys: Vec<[u8; LABEL_KEY_LEN]> = (0..MAX_LABELS)
+        .map(|i| {
+            let mut key = [b'k'; LABEL_KEY_LEN];
+            key[0] = b'a' + u8::try_from(i).unwrap();
+            key
+        })
+        .collect();
+    let value = [b'v'; LABEL_VALUE_LEN];
+    let labels: Vec<(&[u8], &[u8])> = keys.iter().map(|k| (&k[..], &value[..])).collect();
+    let rec = cgroup(b"/", &labels).unwrap();
+    assert_eq!(rec.len(), size_of::<CgroupPrefix>() + 1 + LABELS_LEN);
+    assert!(matches!(
+        decode_one(&rec).body,
+        Body::Cgroup { path: b"/", labels, .. } if labels.iter().count() == MAX_LABELS
+    ));
+    // No path and no labels: the prefix alone.
+    let bare = cgroup(b"", &[]).unwrap();
+    assert_eq!(bare.len(), size_of::<CgroupPrefix>());
+    assert!(matches!(
+        decode_one(&bare).body,
+        Body::Cgroup { path: b"", labels, .. } if labels.is_empty()
+    ));
 }
 
 #[test]
@@ -532,7 +568,13 @@ fn cgroup_records_with_bad_fields_are_corrupt() {
     }
     // Labels that are not key and value pairs, or not valid ones.
     let body = size_of::<CgroupPrefix>() + 2;
-    for labels in [&b"name\0"[..], b"name\0x", b"Name\0x\0", b"n\0\x07\0"] {
+    for labels in [
+        &b"name\0"[..],
+        b"name\0x",
+        b"Name\0x\0",
+        b"n\0\x07\0",
+        b"role\0viewer\0role\0admin\0",
+    ] {
         let mut rec = good[..body].to_vec();
         rec.extend_from_slice(labels);
         let len = rec.len();

@@ -22,7 +22,7 @@
 //! file of sink output.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::io::{self, Read as _};
 use std::mem;
 
@@ -380,6 +380,87 @@ impl Report {
     #[must_use]
     pub fn intact(&self) -> bool {
         self.unreadable == 0 && self.streams.values().all(|s| s.problems.is_empty())
+    }
+
+    /// Whether the report also shows every stream whole: intact, and ended.
+    /// A stream without its end line may have lost lines after its last
+    /// checkpoint, the end line among them, with no trace. It may also just be
+    /// running still, or its sink may have stopped, so that is no problem of
+    /// its own.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.intact() && self.streams.values().all(|s| s.ended)
+    }
+}
+
+/// The report as text, a few lines per stream. Stream ids, signers, nodes and
+/// problems come from the archive, so they are shown escaped (see [`Shown`]).
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (stream, s) in &self.streams {
+            writeln!(
+                f,
+                "stream {}: {} lines, {} verified by {} checkpoints, {}",
+                Shown(stream),
+                s.lines,
+                s.verified,
+                s.checkpoints,
+                if s.ended { "ended" } else { "open" }
+            )?;
+            if s.duplicates > 0 {
+                writeln!(f, "  {} repeated deliveries dropped", s.duplicates)?;
+            }
+            match &s.signer {
+                Some(id) if s.trusted => match &s.node {
+                    Some(node) => writeln!(
+                        f,
+                        "  signed by {}, trusted by the bundle, on node {}",
+                        Shown(id),
+                        Shown(node)
+                    )?,
+                    None => writeln!(f, "  signed by {}, trusted by the bundle", Shown(id))?,
+                },
+                Some(id) => writeln!(
+                    f,
+                    "  signed by {}, not checked against a trust bundle",
+                    Shown(id)
+                )?,
+                None if s.signed => writeln!(f, "  signature not accepted")?,
+                None => writeln!(f, "  not signed")?,
+            }
+            if !s.ended {
+                writeln!(
+                    f,
+                    "  not ended: lines after its last checkpoint may be missing"
+                )?;
+            }
+            for problem in &s.problems {
+                writeln!(f, "  problem: {}", Shown(problem))?;
+            }
+        }
+        writeln!(
+            f,
+            "{} lines outside any stream, {} unreadable",
+            self.outside, self.unreadable
+        )
+    }
+}
+
+/// Text from the archive as a report shows it: printable ASCII as it is, and
+/// anything else, a backslash included, escaped. A tampered archive can then
+/// neither add lines to the report nor send control sequences to a terminal.
+struct Shown<'a>(&'a str);
+
+impl fmt::Display for Shown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for c in self.0.chars() {
+            if c == ' ' || (c.is_ascii_graphic() && c != '\\') {
+                f.write_char(c)?;
+            } else {
+                write!(f, "{}", c.escape_default())?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1053,6 +1134,34 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_cut_at_a_checkpoint_is_intact_but_not_complete() {
+        let out = stream(600);
+        let l = lines(&out);
+        // Everything after the second checkpoint goes: lines, the last
+        // checkpoint and the end line. What is left still chains.
+        let second = l
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.windows(23).any(|w| w == b"creche.audit.checkpoint"))
+            .nth(1)
+            .map(|(i, _)| i)
+            .unwrap();
+        let cut = l[..=second].concat();
+        let report = verify(&cut, None);
+        let s = &report.streams["s1"];
+        assert!(report.intact(), "{report:?}");
+        assert!(!report.complete());
+        assert!(!s.ended);
+        assert_eq!(s.lines, s.verified);
+        assert!(
+            report
+                .to_string()
+                .contains("  not ended: lines after its last checkpoint may be missing\n")
+        );
+        assert!(verify(&out, None).complete());
+    }
+
+    #[test]
     fn a_forged_checkpoint_does_not_chain() {
         let out = String::from_utf8(stream(600)).unwrap();
         let forged = out.replacen(
@@ -1106,6 +1215,103 @@ mod tests {
         let report = verify(&out, None);
         assert_eq!((report.outside, report.unreadable), (1, 1));
         assert!(!report.intact());
+    }
+
+    #[test]
+    fn reports_show_one_stream_per_line_group() {
+        let report = verify(&stream(2), None);
+        assert_eq!(
+            report.to_string(),
+            "stream s1: 3 lines, 3 verified by 1 checkpoints, ended\n  not signed\n\
+             0 lines outside any stream, 0 unreadable\n"
+        );
+    }
+
+    #[test]
+    fn reports_say_how_each_stream_was_signed() {
+        let report = Report {
+            streams: [
+                (
+                    "q\"'".to_owned(),
+                    StreamReport {
+                        ended: true,
+                        duplicates: 2,
+                        signed: true,
+                        signer: Some("spiffe://x/sink".to_owned()),
+                        ..StreamReport::default()
+                    },
+                ),
+                (
+                    "r".to_owned(),
+                    StreamReport {
+                        ended: true,
+                        signed: true,
+                        ..StreamReport::default()
+                    },
+                ),
+            ]
+            .into(),
+            ..Report::default()
+        };
+        assert_eq!(
+            report.to_string(),
+            "stream q\"': 0 lines, 0 verified by 0 checkpoints, ended\n\
+             \x20 2 repeated deliveries dropped\n\
+             \x20 signed by spiffe://x/sink, not checked against a trust bundle\n\
+             stream r: 0 lines, 0 verified by 0 checkpoints, ended\n\
+             \x20 signature not accepted\n\
+             0 lines outside any stream, 0 unreadable\n"
+        );
+    }
+
+    #[test]
+    fn the_first_checkpoint_hashes_zeroes_then_its_lines() {
+        let out = stream(0);
+        let l = lines(&out);
+        let checkpoint: serde_json::Value = serde_json::from_slice(l[1]).unwrap();
+        let mut expected = Sha256::new();
+        expected.update([0; 32]);
+        expected.update(l[0]);
+        assert_eq!(checkpoint["creche.audit.hash"], hex(&expected.finalize()));
+    }
+
+    #[test]
+    fn a_chain_never_shows_its_key() {
+        let (_, chain) = signed_stream(1, &sink_svid());
+        let shown = format!("{chain:?}");
+        assert!(shown.contains("Ratchet { stream: \"s1\", .. }"), "{shown}");
+        assert!(!shown.contains("SigningKey"), "{shown}");
+    }
+
+    #[test]
+    fn archive_text_cannot_add_report_lines() {
+        // A tampered archive chooses stream ids, signers, nodes and the event
+        // names problems quote.
+        let forged = StreamReport {
+            signer: Some("spiffe://x/sink\u{202e}".to_owned()),
+            trusted: true,
+            node: Some("n\r\n  signed by spiffe://x/other".to_owned()),
+            problems: vec!["event \u{1b}[2K\\n".to_owned()],
+            ..StreamReport::default()
+        };
+        let report = Report {
+            streams: [(
+                "s1: 1 lines, 1 verified by 1 checkpoints, ended\nstream s2".to_owned(),
+                forged,
+            )]
+            .into(),
+            ..Report::default()
+        };
+        assert_eq!(
+            report.to_string(),
+            "stream s1: 1 lines, 1 verified by 1 checkpoints, ended\\nstream s2: 0 lines, \
+             0 verified by 0 checkpoints, open\n\
+             \x20 signed by spiffe://x/sink\\u{202e}, trusted by the bundle, on node \
+             n\\r\\n  signed by spiffe://x/other\n\
+             \x20 not ended: lines after its last checkpoint may be missing\n\
+             \x20 problem: event \\u{1b}[2K\\\\n\n\
+             0 lines outside any stream, 0 unreadable\n"
+        );
     }
 
     fn svid(chain: &[u8]) -> Svid {

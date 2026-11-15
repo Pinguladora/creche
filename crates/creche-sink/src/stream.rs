@@ -1,11 +1,13 @@
 //! Turning a byte stream from one sandbox into output: JSON lines, or the
 //! records themselves in frames (see [`Format::Raw`]).
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use creche_wire::{Body, DecodeError, Records};
+use creche_wire::{Body, DecodeError, HelloFlags, Record, Records};
 
 use crate::audit::Chain;
+use crate::guard::{self, Guard};
 use crate::json::{self, Cgroup, Origin, Value};
 use crate::k8s::Containers;
 use crate::tasks::{Cgroups, TaskInfo, Tasks};
@@ -48,6 +50,14 @@ struct JsonState {
     cgroups: Cgroups,
     /// The next line's `creche.seq`.
     seq: u64,
+    /// The guard evidence of the stream's sandbox, and the stream's number in
+    /// it, when the sink judges guard claims.
+    guard: Option<guard::Handle>,
+    /// Whether the stream was told it no longer counts as guarded.
+    unguarded: bool,
+    /// How long the sink held the stream's next read back itself, in
+    /// nanoseconds.
+    held_ns: u64,
 }
 
 /// Returns `*seq` and advances it.
@@ -55,6 +65,27 @@ fn next(seq: &mut u64) -> u64 {
     let current = *seq;
     *seq = current.saturating_add(1);
     current
+}
+
+/// Renders `record` with what the stream knows of its process and of the
+/// process's cgroup, and for a hello, the sink's verdict on its guard claim.
+fn render(
+    origin: &Origin,
+    record: &Record<'_>,
+    state: &JsonState,
+    observed_ns: u64,
+    seq: u64,
+    out: &mut Vec<u8>,
+) {
+    let task = state.tasks.get(record.header.pid);
+    let cgroup = task.and_then(|t| state.cgroups.get(t.cgroup_id));
+    let guarded = match (&record.body, &state.guard) {
+        (Body::Hello { flags, .. }, Some(guard)) => {
+            Some(guard.hello(flags.contains(HelloFlags::GUARDED), observed_ns))
+        }
+        _ => None,
+    };
+    json::render_judged(origin, record, task, cgroup, guarded, observed_ns, seq, out);
 }
 
 impl StreamDecoder {
@@ -72,6 +103,14 @@ impl StreamDecoder {
     #[must_use]
     pub fn with_containers(mut self, containers: Containers) -> Self {
         self.json.containers = Some(containers);
+        self
+    }
+
+    /// Also judges the guard claims of the stream's hellos against what
+    /// `guard` saw of its sandbox's other streams (see [`crate::guard`]).
+    #[must_use]
+    pub fn with_guard(mut self, guard: &Arc<Guard>) -> Self {
+        self.json.guard = Some(Guard::open(guard));
         self
     }
 
@@ -193,8 +232,44 @@ impl StreamDecoder {
         };
         if format == Format::Json {
             self.audit(origin, observed_ns, start, out);
+            if let Some(guard) = &self.json.guard {
+                let _breached = guard.sent(observed_ns, data.len(), self.json.held_ns);
+            }
+            self.note_guard(origin, observed_ns, out);
         }
         result
+    }
+
+    /// How long the sink held the stream's next read back itself, waiting for
+    /// room in its output. That time is late through no doing of the guest, so
+    /// it does not count toward a second sender (see [`crate::guard`]).
+    pub fn held_back(&mut self, held: std::time::Duration) {
+        self.json.held_ns = u64::try_from(held.as_nanos()).unwrap_or(u64::MAX);
+    }
+
+    /// Says once, when two streams of the stream's sandbox were seen sending at
+    /// once, that the stream no longer counts as guarded: its hello line may
+    /// have said it was. Runs with every input, and should run before the
+    /// stream's end line, for a stream that stayed quiet since.
+    pub fn note_guard(&mut self, origin: &Origin, observed_ns: u64, out: &mut Vec<u8>) {
+        let breached = self
+            .json
+            .guard
+            .as_ref()
+            .is_some_and(guard::Handle::breached);
+        if breached && !self.json.unguarded {
+            self.json.unguarded = true;
+            self.event(
+                origin,
+                "creche.stream.unguarded",
+                observed_ns,
+                &[(
+                    "creche.stream.unguarded_reason",
+                    Value::Str("concurrent_streams"),
+                )],
+                out,
+            );
+        }
     }
 
     /// Bytes of an incomplete record waiting for more input.
@@ -242,14 +317,13 @@ fn render_all(
         match record.body {
             Body::Task { context, cgroup } => {
                 let mut info = TaskInfo::new(&context, cgroup);
-                info.cgroup_info = state.cgroups.get(context.cgroup_id);
                 if let Some(containers) = state.containers.as_mut() {
                     // The path, when known, names the container a nested
                     // cgroup sits in. The leaf name alone does not.
-                    let scope = info
-                        .cgroup_info
-                        .as_ref()
-                        .map_or(&*info.cgroup, |c| c.container_scope());
+                    let scope = state
+                        .cgroups
+                        .get(context.cgroup_id)
+                        .map_or(&*info.cgroup, Cgroup::container_scope);
                     info.container = containers.claim(scope);
                 }
                 state.tasks.set(pid, info);
@@ -265,21 +339,21 @@ fn render_all(
             Body::Exec { context, .. } => {
                 state.tasks.exec(pid, &context);
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
             }
             Body::Fork { ppid } => {
                 state.tasks.fork(ppid, pid);
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
             }
             Body::Exit { .. } => {
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
                 state.tasks.exit(pid);
             }
             _ => {
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
             }
         }
     }
@@ -661,6 +735,71 @@ mod tests {
     }
 
     #[test]
+    fn lines_take_their_cgroups_latest_description() {
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        // Processes hold no description of their own: the stream keeps one per
+        // cgroup, however many processes and descriptions the guest sends.
+        let data = [
+            cgroup(5, 0, "/a", &[("name", "first")]),
+            task_in(10, 1, &sh, 5, b"a\0"),
+            fork(11, 10),
+            cgroup(5, 0, "/a", &[("name", "second")]),
+            fork(12, 10),
+        ]
+        .concat();
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let l = lines(&out);
+        assert_eq!(l[0]["creche.guest.agent.name"], "first");
+        assert_eq!(l[1]["creche.guest.agent.name"], "second");
+    }
+
+    #[test]
+    fn a_cgroup_described_again_under_another_container_loses_the_first() {
+        use std::sync::Arc;
+
+        let ours = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
+        let theirs = "b".repeat(64);
+        let tmp = bundles(&[(ours, "sb"), (&theirs, "other")]);
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let data = [
+            cgroup(
+                5,
+                0,
+                &format!("/kubepods/cri-containerd-{ours}.scope/planner"),
+                &[],
+            ),
+            task_in(10, 1, &sh, 5, b"planner\0"),
+            fork(11, 10),
+            cgroup(
+                5,
+                0,
+                &format!("/kubepods/cri-containerd-{theirs}.scope/tools"),
+                &[],
+            ),
+            fork(12, 10),
+        ]
+        .concat();
+        let containers = Containers::new(Arc::from(tmp.path()), Arc::from("sb"));
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .with_containers(containers)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let l = lines(&out);
+        assert_eq!(l[0]["creche.guest.container.id"], ours);
+        assert!(
+            l[1]["creche.cgroup.path"]
+                .as_str()
+                .unwrap()
+                .contains(&theirs)
+        );
+        assert!(l[1].get("creche.guest.container.id").is_none());
+    }
+
+    #[test]
     fn a_cgroup_without_labels_has_a_path_and_no_owner() {
         let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
         let data = [
@@ -850,5 +989,218 @@ mod tests {
             prop_assert_eq!(chunked, whole);
             prop_assert_eq!(d.pending(), 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use creche_wire::{
+        HEARTBEAT_LEN, HELLO_LEN, Header, HeartbeatRecord, HelloRecord, Kind, VERSION,
+    };
+    use zerocopy::IntoBytes as _;
+
+    fn hello(guarded: bool) -> Vec<u8> {
+        let flags = if guarded {
+            HelloFlags::DEDUP.with(HelloFlags::GUARDED)
+        } else {
+            HelloFlags::DEDUP
+        };
+        HelloRecord {
+            header: Header::for_observer(Kind::Hello, HELLO_LEN, 7, 1),
+            version: VERSION,
+            flags,
+        }
+        .as_bytes()
+        .to_vec()
+    }
+
+    fn heartbeat() -> Vec<u8> {
+        HeartbeatRecord {
+            header: Header::for_observer(Kind::Heartbeat, HEARTBEAT_LEN, 7, 2),
+            ..HeartbeatRecord::default()
+        }
+        .as_bytes()
+        .to_vec()
+    }
+
+    /// A stream of the sandbox `guard` judges, with its audit chain.
+    fn stream(guard: &Arc<Guard>) -> StreamDecoder {
+        StreamDecoder::new(Format::Json)
+            .with_audit()
+            .with_guard(guard)
+    }
+
+    /// Late enough after a newer hello to count as a second sender.
+    const LATE: u64 = crate::guard::STALE_NS + 2;
+
+    /// The JSON lines `decoder` writes for `data`, early on.
+    fn feed(decoder: &mut StreamDecoder, data: &[u8]) -> Vec<serde_json::Value> {
+        feed_at(decoder, data, 1)
+    }
+
+    /// The JSON lines `decoder` writes for `data` at host time `ns`.
+    fn feed_at(decoder: &mut StreamDecoder, data: &[u8], ns: u64) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        decoder.feed_at(data, &"sb".into(), ns, &mut out).unwrap();
+        out.split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).unwrap())
+            .collect()
+    }
+
+    fn named<'a>(lines: &'a [serde_json::Value], name: &str) -> Vec<&'a serde_json::Value> {
+        lines.iter().filter(|v| v["event.name"] == name).collect()
+    }
+
+    #[test]
+    fn a_later_claim_the_first_hello_did_not_make_is_not_taken() {
+        let guard = Arc::default();
+        let first = feed(&mut stream(&guard), &hello(false));
+        assert_eq!(
+            named(&first, "creche.observer.hello")[0]["creche.observer.guarded"],
+            false
+        );
+        let forged = feed(&mut stream(&guard), &hello(true));
+        let hello = named(&forged, "creche.observer.hello")[0];
+        assert_eq!(hello["creche.observer.guarded"], false);
+        assert_eq!(hello["creche.observer.guard_claimed"], true);
+        // The claim itself stays visible in the flags.
+        assert_eq!(hello["creche.observer.flags"], 5);
+    }
+
+    #[test]
+    fn two_streams_sending_at_once_lose_the_guard() {
+        let guard = Arc::default();
+        let (mut observer, mut intruder) = (stream(&guard), stream(&guard));
+        let said = feed(&mut observer, &hello(true));
+        assert_eq!(
+            named(&said, "creche.observer.hello")[0]["creche.observer.guarded"],
+            true
+        );
+        let said = feed(&mut intruder, &hello(true));
+        assert_eq!(
+            named(&said, "creche.observer.hello")[0]["creche.observer.guarded"],
+            true
+        );
+        assert_eq!(named(&said, "creche.stream.unguarded").len(), 0);
+        // The older stream still sends well after the newer one said hello.
+        let lines = feed_at(&mut observer, &heartbeat(), LATE);
+        let unguarded = named(&lines, "creche.stream.unguarded");
+        assert_eq!(unguarded.len(), 1);
+        assert_eq!(
+            unguarded[0]["creche.stream.unguarded_reason"],
+            "concurrent_streams"
+        );
+        // The newer stream hears of it with its next records, once.
+        assert_eq!(
+            named(
+                &feed(&mut intruder, &heartbeat()),
+                "creche.stream.unguarded"
+            )
+            .len(),
+            1
+        );
+        let again = feed(&mut intruder, &heartbeat());
+        assert_eq!(named(&again, "creche.stream.unguarded").len(), 0);
+        // And no later hello of the sandbox counts as guarded.
+        let later = feed(&mut stream(&guard), &hello(true));
+        assert_eq!(
+            named(&later, "creche.observer.hello")[0]["creche.observer.guarded"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_stream_told_it_is_unguarded_still_verifies() {
+        let guard = Arc::default();
+        let (mut observer, mut intruder) = (stream(&guard), stream(&guard));
+        let origin = Origin::from("sb").with_stream("s1");
+        let mut out = Vec::new();
+        observer.event(&origin, "creche.stream.start", 1, &[], &mut out);
+        observer
+            .feed_at(&hello(true), &origin, 1, &mut out)
+            .unwrap();
+        feed(&mut intruder, &hello(true));
+        observer
+            .feed_at(&heartbeat(), &origin, LATE, &mut out)
+            .unwrap();
+        observer.event(&origin, "creche.stream.end", LATE, &[], &mut out);
+        observer.finish(&origin, LATE, &mut out);
+        assert!(String::from_utf8_lossy(&out).contains("creche.stream.unguarded"));
+        assert!(crate::audit::verify(&out, None).complete());
+    }
+
+    #[test]
+    fn what_a_restarted_observer_left_behind_is_not_a_second_sender() {
+        let guard = Arc::default();
+        let mut old = stream(&guard);
+        feed(&mut old, &hello(true));
+        let mut new = stream(&guard);
+        feed(&mut new, &hello(true));
+        // The old connection's last records are read after the new hello.
+        let lines = feed_at(&mut old, &heartbeat(), 2);
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 0);
+        let lines = feed_at(&mut new, &[hello(true), heartbeat()].concat(), LATE);
+        assert_eq!(
+            named(&lines, "creche.observer.hello")[0]["creche.observer.guarded"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_read_the_sink_held_back_is_not_a_second_sender() {
+        let guard = Arc::default();
+        let (mut old, mut new) = (stream(&guard), stream(&guard));
+        feed(&mut old, &hello(true));
+        feed(&mut new, &hello(true));
+        // The sink's output was full, so the old stream's last records are
+        // read late.
+        old.held_back(std::time::Duration::from_nanos(LATE));
+        let lines = feed_at(&mut old, &heartbeat(), LATE);
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 0);
+        // Read promptly once more time has gone by: a second sender.
+        old.held_back(std::time::Duration::ZERO);
+        let lines = feed_at(&mut old, &heartbeat(), 2 * LATE);
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 1);
+    }
+
+    #[test]
+    fn a_quiet_stream_hears_of_the_breach_when_it_ends() {
+        let guard = Arc::default();
+        let (mut observer, mut intruder) = (stream(&guard), stream(&guard));
+        feed(&mut observer, &hello(true));
+        feed(&mut intruder, &hello(true));
+        feed_at(&mut observer, &heartbeat(), LATE);
+        // The intruder sends nothing more, then its stream ends.
+        let mut out = Vec::new();
+        intruder.note_guard(&"sb".into(), LATE, &mut out);
+        assert!(String::from_utf8_lossy(&out).contains("creche.stream.unguarded"));
+        out.clear();
+        intruder.note_guard(&"sb".into(), LATE, &mut out);
+        assert_eq!(out.len(), 0);
+    }
+
+    #[test]
+    fn a_restarted_observer_keeps_its_guard() {
+        let guard = Arc::default();
+        let mut old = stream(&guard);
+        feed(&mut old, &[hello(true), heartbeat()].concat());
+        // The old connection broke. The observer connects again.
+        let mut new = stream(&guard);
+        let lines = feed(&mut new, &[hello(true), heartbeat()].concat());
+        assert_eq!(
+            named(&lines, "creche.observer.hello")[0]["creche.observer.guarded"],
+            true
+        );
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 0);
+    }
+
+    #[test]
+    fn without_a_guard_the_claim_is_shown_as_made() {
+        let lines = feed(&mut StreamDecoder::new(Format::Json), &hello(true));
+        let hello = named(&lines, "creche.observer.hello")[0];
+        assert_eq!(hello["creche.observer.guarded"], true);
+        assert!(hello.get("creche.observer.guard_claimed").is_none());
     }
 }

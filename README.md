@@ -44,13 +44,16 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   refuses the observer's vsock port to every other guest process, so a workload
   cannot send records the host would take for the observer's. The guard counts
   the connects it sees, the observer's own included, so the observer knows it
-  runs and says so in its hello record (`creche.observer.guarded`). Kernels
-  without BPF LSM still work, reported as unguarded.
+  runs and says so in its hello record. The sink takes that claim only when the
+  sandbox's first hello made it too and no two of its streams send at once, and
+  writes its verdict as `creche.observer.guarded`. Kernels without BPF LSM still
+  work, reported as unguarded.
 - **Whole records only.** The forwarding queue is bounded and never splits a record
   across connections. Heartbeats report drops so silence can be told from blindness.
 - **The host attests the sandbox.** Each sandbox's socket is mode 0600, owned by
-  its VMM's user, and the sink accepts only the process holding that sandbox's
-  listening vsock socket, checked through the peer's credentials and `/proc`.
+  its VMM's user, and the sink accepts only the process listening on that
+  sandbox's vsock socket, as the kernel reports it for a connection to it, pinned
+  by its pid and start time.
   The sandbox id on every line comes from the host, never from the guest. What
   the guest reports inside the stream is the guest's claim. Sandbox ids must be
   containerd identifiers, and each sandbox gets at most 4 connections.
@@ -184,20 +187,27 @@ the pipelines they already feed.
   `creche.process.fork`, `creche.process.exit`, `creche.network.connect`,
   `creche.file.open_write`, `creche.observer.hello` and
   `creche.observer.heartbeat`. `observed_time_unix_nano` is the host's clock when
-  the event arrived: the guest only knows its own boot time.
+  the event arrived: the guest only knows its own boot time. A hello's
+  `creche.observer.guarded` is the sink's verdict on the observer's claim, and
+  `creche.observer.guard_claimed: true` marks a claim it did not take.
 - **Audit trail** (JSON only): each connection is a stream with its own
   `creche.stream.id`, opened by a `creche.stream.start` line naming the peer
   (`creche.peer.pid`, `creche.peer.uid`) and closed by `creche.stream.end` with
-  `creche.stream.end_reason` (`closed`, `read_error` or `corrupt`). Every line of a
+  `creche.stream.end_reason` (`closed`, `read_error` or `corrupt`). A
+  `creche.stream.unguarded` line, with `creche.stream.unguarded_reason`
+  `concurrent_streams`, says the stream no longer counts as guarded. Every line of a
   stream has `creche.seq`, counting from 0. A `creche.audit.checkpoint` line
   follows once 256 lines or a second have passed and when the stream ends. It
   covers `creche.seq.first` to `creche.seq.last` with
   `creche.audit.hash = SHA-256(creche.audit.prev || the exact bytes of those lines)`,
   starting from 32 zero bytes. A missing line shows as a gap in `creche.seq`, a
   changed one as a mismatched hash. `creche-sink --verify FILE` checks saved
-  output. Refused connections are `creche.sink.refused` lines, outside any stream,
-  with the peer and `creche.sink.refusal`. The chain proves integrity only as far
-  as its checkpoints are kept out of reach, for example shipped to a second store.
+  output. It exits with 1 when a stream does not add up, and with 3 when all do
+  but one has no end line. Lines after that stream's last checkpoint may then be
+  missing with no trace, or its sink stopped before the stream ended. Refused
+  connections are `creche.sink.refused` lines, outside any stream, with the peer
+  and `creche.sink.refusal`. The chain proves integrity only as far as its
+  checkpoints are kept out of reach, for example shipped to a second store.
 - **Signed streams** (`--spiffe-socket PATH`): the sink takes its X.509-SVID from
   the SPIFFE Workload API. Each stream starts with a fresh P-256 key whose public
   half (`creche.audit.key`) the SVID signs (`creche.audit.key_sig`, with the SVID
@@ -205,7 +215,13 @@ the pipelines they already feed.
   key (`creche.audit.sig`) and names the next one (`creche.audit.next_key`),
   derived from the current key and the checkpoint hash, and the current key is
   then erased. Whoever takes over the sink later cannot sign earlier checkpoints
-  again. `creche-sink --verify FILE --bundle bundle.pem --spiffe-id ID` checks that
+  again. The sink marks itself not dumpable as it starts, so other processes of
+  its user, the VMM's when it runs as that, can neither trace it nor read the
+  keys from its memory. One that attached before that could keep it dumpable, so
+  run the sink as its own user, or where its user cannot trace other processes
+  (Yama `ptrace_scope` 2 or more, or 1 when everything that starts the sink is
+  trusted: mode 1 still lets a process trace its descendants).
+  `creche-sink --verify FILE --bundle bundle.pem --spiffe-id ID` checks that
   every stream is signed by one of the given sink SPIFFE IDs, with an SVID that
   chained to the trust bundle at the stream's start. The IDs are required: any
   other workload in the trust domain has an SVID too.

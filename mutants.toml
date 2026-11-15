@@ -9,7 +9,20 @@ examine_globs = [
     "crates/creche-sink/src/stream.rs",
     "crates/creche-sink/src/tasks.rs",
     "crates/creche-sink/src/listen.rs",
+    "crates/creche-sink/src/audit.rs",
+    "crates/creche-sink/src/guard.rs",
+    "crates/creche-sink/src/otlp.rs",
+    "crates/creche-sink/src/peer.rs",
+    "crates/creche-sink/src/k8s.rs",
+    "crates/creche-observer/src/cgroups.rs",
 ]
 test_tool = "nextest"
-# `listen::run` only binds `run_with` (tested end to end) to stdout.
-exclude_re = ['creche-sink/src/listen\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)']
+exclude_re = [
+  # `listen::run` only binds `run_with` (tested end to end) to stdout.
+  'creche-sink/src/listen\.rs:\d+:\d+: replace run -> io::Result<\(\)> with Ok\(\(\)\)',
+  # Only built outside tests, which cannot create root-owned bundles.
+  'creche-sink/src/k8s\.rs:\d+:\d+: replace trusted_owners -> Vec<u32>',
+  # MAX_RESPONSE only caps the memory a response takes: the status line comes
+  # first and is read whatever the cap. Its line, to update when it moves.
+  'creche-sink/src/otlp\.rs:41:32: replace \* with \+',
+]
