@@ -1,0 +1,108 @@
+# Project rules for opengrep, for the kinds of bugs reviews found here before.
+# `mise run lint:opengrep` scans the crates with them and tests them against
+# creche.rs, whose `ruleid` and `ok` comments say where each must and must not
+# match. A match that is safe takes a `nosemgrep: <id>` comment saying why.
+rules:
+  - id: host-follows-a-path
+    message: >-
+      This follows links in a path the sink did not write itself. On the host, a process of the VMM's user can plant a link to any sandbox's files, and a path read out of /proc is only the name its owner chose. Identify the object another way, or read it without following links, and say why this one is safe in a nosemgrep comment if it is.
+    severity: ERROR
+    languages: [rust]
+    patterns:
+      - pattern-either:
+          - pattern: fs::metadata($P)
+          - pattern: std::fs::metadata($P)
+          - pattern: fs::canonicalize($P)
+          - pattern: std::fs::canonicalize($P)
+          - pattern: File::open($P)
+          - pattern: fs::File::open($P)
+          - pattern: std::fs::File::open($P)
+      - metavariable-regex:
+          metavariable: $P
+          regex: '^(?!")'
+      - pattern-not-inside: |
+          mod tests { ... }
+    paths:
+      include:
+        - "crates/creche-sink/src/**"
+        - "opengrep/*.rs"
+      exclude:
+        - "**/tests.rs"
+        - "**/tests/**"
+
+  - id: unbounded-insert
+    message: >-
+      `self.$M` grows with every insert and nothing in this function bounds it. When what is inserted comes from a guest or a peer, it grows without end. Check `self.$M.len()` against a bound here, or say why it cannot grow.
+    severity: WARNING
+    languages: [rust]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              fn $F(&mut self, ...) { ... }
+          - pattern-inside: |
+              fn $F(&mut self, ...) -> $RET { ... }
+      - pattern: self.$M.insert(...)
+      # A statement before the insert that checks its length.
+      - pattern-not-inside: |
+          fn $F(&mut self, ...) {
+            ...
+            <... self.$M.len() ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          fn $F(&mut self, ...) -> $RET {
+            ...
+            <... self.$M.len() ...>;
+            ...
+          }
+
+  - id: decoding-on-the-runtime-thread
+    message: >-
+      One thread runs every sandbox's stream. Decoding can block, for instance on a container's bundle, so it runs on the blocking pool (tokio::task::spawn_blocking), never in an async fn directly.
+    severity: ERROR
+    languages: [rust]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              async fn $F(...) { ... }
+          - pattern-inside: |
+              async fn $F(...) -> $RET { ... }
+      - pattern-either:
+          - pattern: $D.feed_at(...)
+          - pattern: $D.feed(...)
+          - pattern: $C.claim(...)
+      - pattern-not-inside: tokio::task::spawn_blocking(...)
+      - pattern-not-inside: spawn_blocking(...)
+
+  - id: blocking-fs-in-async-fn
+    message: >-
+      std::fs blocks the one thread every stream runs on. Use tokio::fs, or tokio::task::spawn_blocking.
+    severity: ERROR
+    languages: [rust]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              async fn $F(...) { ... }
+          - pattern-inside: |
+              async fn $F(...) -> $RET { ... }
+      - pattern-either:
+          - pattern: std::fs::$CALL(...)
+          - pattern: fs::$CALL(...)
+      - pattern-not-inside: tokio::task::spawn_blocking(...)
+      - pattern-not-inside: spawn_blocking(...)
+
+  - id: interpolated-protocol-head
+    message: >-
+      A value is interpolated into a line-based protocol head. A line break in it ends the line and starts one of its author's choosing. Reject control characters where the value is parsed, and say so in a nosemgrep comment.
+    severity: ERROR
+    languages: [rust]
+    # Rust patterns do not match inside macros with several arguments, so this
+    # reads the source: a format string with CRLF that takes any argument.
+    pattern-either:
+      - pattern-regex: '(format|write|writeln)!\(\s*(\w+,\s*)?"([^"\\]|\\[\s\S])*\\r\\n([^"\\]|\\[\s\S])*"\s*,'
+      - pattern-regex: '(format|write|writeln)!\(\s*(\w+,\s*)?"([^"\\]|\\[\s\S])*\{[A-Za-z_][\w.]*\}([^"\\]|\\[\s\S])*\\r\\n'
+      - pattern-regex: '(format|write|writeln)!\(\s*(\w+,\s*)?"([^"\\]|\\[\s\S])*\\r\\n([^"\\]|\\[\s\S])*\{[A-Za-z_][\w.]*\}'
+    paths:
+      exclude:
+        - "**/tests.rs"
+        - "**/tests/**"

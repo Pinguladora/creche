@@ -88,6 +88,35 @@ url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/679074354"
 provenance = "github-attestations"
 
+[[tools."github:opengrep/opengrep"]]
+version = "2.0.0"
+backend = "github:opengrep/opengrep"
+specifiers = ["2.0.0"]
+
+[tools."github:opengrep/opengrep"."platforms.linux-x64"]
+checksum = "sha256:37e93f4da5fd04a18c5c1febbdd12f7e98dfccd4d0c9cf2593bcb25eeb462da0"
+url = "https://github.com/opengrep/opengrep/releases/download/v2.0.0/opengrep_linux_x86"
+url_api = "https://api.github.com/repos/opengrep/opengrep/releases/assets/743710463"
+provenance = "github-attestations"
+
+[tools."github:opengrep/opengrep"."platforms.linux-x64-musl"]
+checksum = "sha256:37e93f4da5fd04a18c5c1febbdd12f7e98dfccd4d0c9cf2593bcb25eeb462da0"
+url = "https://github.com/opengrep/opengrep/releases/download/v2.0.0/opengrep_linux_x86"
+url_api = "https://api.github.com/repos/opengrep/opengrep/releases/assets/743710463"
+provenance = "github-attestations"
+
+[tools."github:opengrep/opengrep"."platforms.macos-x64"]
+checksum = "sha256:51d2f918d7aad0afc1426bb4fbf56e32fc70c3ffd5ddb78e32e7d61e51c029a2"
+url = "https://github.com/opengrep/opengrep/releases/download/v2.0.0/opengrep_osx_x86"
+url_api = "https://api.github.com/repos/opengrep/opengrep/releases/assets/743710471"
+provenance = "github-attestations"
+
+[tools."github:opengrep/opengrep"."platforms.windows-x64"]
+checksum = "sha256:899a17e2b15863367cfd15032c93cdf482fd4e7ec8719c69de46f4f38b227864"
+url = "https://github.com/opengrep/opengrep/releases/download/v2.0.0/opengrep_windows_x86.zip"
+url_api = "https://api.github.com/repos/opengrep/opengrep/releases/assets/743710468"
+provenance = "github-attestations"
+
 [[tools.jactionlint]]
 version = "2.5.0"
 backend = "packslip:github.com/jdx/jactionlint"
