@@ -31,8 +31,8 @@ run = [
 ]
 
 [tasks."ci:check"]
-description = "Full CI gate: format, clippy, cargo-deny, the fuzz workspace, then the tests (which build the BPF object)"
-depends = ["ci:fmt", "ci:clippy", "ci:deny", "ci:fuzz"]
+description = "Full CI gate: format, clippy, cargo-deny, the fuzz workspace, the opengrep rules, then the tests (which build the BPF object)"
+depends = ["ci:fmt", "ci:clippy", "ci:deny", "ci:fuzz", "lint:opengrep"]
 run = "mise run test"
 
 [tasks."ci:trivy"]

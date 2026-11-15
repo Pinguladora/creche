@@ -34,6 +34,7 @@ cocogitto = "7.0.0"
 zizmor = "1.32.0"
 jactionlint = { version = "2.5.0", workflow = "release.yaml" }
 trivy = "0.76.2"
+"github:opengrep/opengrep" = "2.0.0"
 
 [tasks.test]
 description = "Unit, property and doc tests, then again with debug assertions on a release build"
@@ -66,6 +67,16 @@ run = [
 ]
 description = "Lint and security-audit the GitHub Actions workflows (jactionlint + zizmor)"
 sources = [".github/workflows/**", ".github/zizmor.yml"]
+
+[tasks."lint:opengrep"]
+description = "Check the code against the project's opengrep rules, after testing the rules themselves"
+# opengrep/creche.yaml holds rules for the kinds of bugs reviews found here. A
+# finding fails the task. One that is safe takes a nosemgrep comment saying why.
+run = [
+  "opengrep test opengrep/",
+  "opengrep scan --quiet --strict --error --config opengrep/creche.yaml crates",
+]
+sources = ["opengrep/**", "crates/**/*.rs"]
 
 [tasks."scan:trivy"]
 description = "Scan for vulnerabilities, misconfigurations and licences with Trivy (report only)"

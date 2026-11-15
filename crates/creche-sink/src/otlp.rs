@@ -417,6 +417,8 @@ async fn send_http(endpoint: &Endpoint, body: &[u8]) -> Outcome {
 
 async fn try_send_http(endpoint: &Endpoint, body: &[u8]) -> io::Result<u16> {
     let mut tcp = TcpStream::connect(&endpoint.authority).await?;
+    // Endpoint::parse accepts only printable ASCII, so no value here breaks a line.
+    // nosemgrep: interpolated-protocol-head
     let head = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\n\
          Content-Encoding: zstd\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
