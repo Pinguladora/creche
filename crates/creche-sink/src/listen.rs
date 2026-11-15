@@ -33,9 +33,16 @@ use crate::stream::{Format, StreamDecoder, now_ns};
 const SCAN_INTERVAL: Duration = Duration::from_millis(200);
 /// Rendered batches waiting for the writer. Senders wait when it is full.
 const OUTPUT_BACKLOG: usize = 1024;
+/// Bytes of rendered lines waiting for the writer, across all streams. Senders
+/// wait while they would not fit. The number of batches alone bounds no
+/// memory: a guest chooses how many lines a read renders to, and how long.
+const OUTPUT_BYTES: usize = 64 << 20; // 64 MiB
 /// Batches waiting for the OTLP exporter. When it is full, batches are dropped
 /// rather than holding up the sink.
 const OTLP_BACKLOG: usize = 1024;
+/// Bytes of lines waiting for the OTLP exporter. Batches that would not fit
+/// are dropped like those beyond [`OTLP_BACKLOG`].
+const OTLP_BYTES: usize = 64 << 20; // 64 MiB
 /// Least time between two reports of lines the exporter dropped.
 const DROP_REPORT: Duration = Duration::from_secs(10);
 /// Read size per connection.
@@ -91,13 +98,15 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (tx, rx) = mpsc::channel(OUTPUT_BACKLOG);
+    let tx = Output::new(tx, Arc::new(Semaphore::new(OUTPUT_BYTES)));
     let exporter = options.otlp.clone().map(|endpoint| {
         eprintln!("creche-sink: exporting to {endpoint}");
         let (otx, orx) = mpsc::channel(OTLP_BACKLOG);
-        tokio::spawn(otlp::export(endpoint, orx));
-        otx
+        let room = Arc::new(Semaphore::new(OTLP_BYTES));
+        tokio::spawn(otlp::export(endpoint, orx, Arc::clone(&room)));
+        Exporter { tx: otx, room }
     });
-    let writer = tokio::spawn(write_output(rx, out, exporter));
+    let writer = tokio::spawn(write_output(rx, Arc::clone(&tx.room), out, exporter));
     let svid = options.spiffe.clone().map(|socket| {
         let (stx, srx) = watch::channel(None);
         tokio::spawn(spiffe::watch(socket, stx));
@@ -118,6 +127,70 @@ struct Listener {
     socket: PathBuf,
 }
 
+/// Where streams send their lines: the writer's queue, bounded in bytes as well
+/// as in batches.
+#[derive(Clone, Debug)]
+struct Output {
+    tx: mpsc::Sender<Batch>,
+    /// A permit per byte that may still be queued. Senders take them for each
+    /// batch and the writer gives them back once it wrote the batch.
+    room: Arc<Semaphore>,
+}
+
+/// The writer is gone.
+#[derive(Debug)]
+struct Closed;
+
+impl Output {
+    const fn new(tx: mpsc::Sender<Batch>, room: Arc<Semaphore>) -> Self {
+        Self { tx, room }
+    }
+
+    /// Queues `batch` for the writer, waiting until it fits.
+    async fn send(&self, batch: Batch) -> Result<(), Closed> {
+        let permits = self
+            .room
+            .acquire_many(output_cost(&batch))
+            .await
+            .map_err(|_| Closed)?;
+        self.tx.send(batch).await.map_err(|_| Closed)?;
+        permits.forget();
+        Ok(())
+    }
+}
+
+/// The permits a batch takes from the writer's queue: its bytes, or all of
+/// [`OUTPUT_BYTES`] for a larger batch, which then waits for an empty queue.
+fn output_cost(batch: &Batch) -> u32 {
+    u32::try_from(batch.lines.len().min(OUTPUT_BYTES)).unwrap_or(u32::MAX)
+}
+
+/// The OTLP exporter's queue.
+#[derive(Debug)]
+struct Exporter {
+    tx: mpsc::Sender<Batch>,
+    /// A permit per byte that may still be queued, given back by the exporter
+    /// (see [`otlp::export`]).
+    room: Arc<Semaphore>,
+}
+
+impl Exporter {
+    /// Queues `batch` if it fits. When it does not, `batch` is handed back.
+    fn try_send(&self, batch: Batch) -> Result<(), Batch> {
+        let permits = u32::try_from(batch.lines.len())
+            .ok()
+            .and_then(|n| self.room.try_acquire_many(n).ok());
+        let Some(permits) = permits else {
+            return Err(batch);
+        };
+        self.tx
+            .try_send(batch)
+            .map_err(mpsc::error::TrySendError::into_inner)?;
+        permits.forget();
+        Ok(())
+    }
+}
+
 impl Drop for Listener {
     fn drop(&mut self) {
         self.task.abort();
@@ -132,7 +205,7 @@ async fn scan(
     options: &Options,
     svid: Option<&SvidWatch>,
     listeners: &mut HashMap<String, Listener>,
-    tx: &mpsc::Sender<Batch>,
+    tx: &Output,
 ) {
     let mut present = Vec::new();
     if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
@@ -206,7 +279,7 @@ struct Sandbox {
     svid: Option<SvidWatch>,
 }
 
-async fn accept(listener: UnixListener, sandbox: Sandbox, format: Format, tx: mpsc::Sender<Batch>) {
+async fn accept(listener: UnixListener, sandbox: Sandbox, format: Format, tx: Output) {
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     while let Ok((stream, _)) = listener.accept().await {
         let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
@@ -228,7 +301,7 @@ async fn admit(
     stream: UnixStream,
     sandbox: Sandbox,
     format: Format,
-    tx: mpsc::Sender<Batch>,
+    tx: Output,
     _permit: OwnedSemaphorePermit,
 ) {
     let cred = stream.peer_cred().ok();
@@ -261,13 +334,7 @@ async fn admit(
 
 /// Logs a refused connection and, in JSON, reports it as a
 /// `creche.sink.refused` line, outside any stream.
-async fn refused(
-    sandbox: &str,
-    reason: &str,
-    peer: Peer,
-    format: Format,
-    tx: &mpsc::Sender<Batch>,
-) {
+async fn refused(sandbox: &str, reason: &str, peer: Peer, format: Format, tx: &Output) {
     eprintln!(
         "creche-sink: refusing a connection to {}: {reason}",
         short(sandbox)
@@ -363,7 +430,7 @@ async fn receive(
     peer: Peer,
     signing: Signing,
     format: Format,
-    tx: mpsc::Sender<Batch>,
+    tx: Output,
 ) {
     let id = stream_id();
     let origin = Arc::new(origin.with_stream(&id));
@@ -433,23 +500,26 @@ async fn receive(
     let _ = tx.send(batch(now, lines)).await;
 }
 
-/// Writes batches in arrival order, flushing whenever the backlog is empty.
+/// Writes batches in arrival order, flushing whenever the backlog is empty, and
+/// gives their room back (see [`Output`]).
 async fn write_output(
     mut rx: mpsc::Receiver<Batch>,
+    room: Arc<Semaphore>,
     out: impl AsyncWrite + Unpin,
-    exporter: Option<mpsc::Sender<Batch>>,
+    exporter: Option<Exporter>,
 ) -> io::Result<()> {
     let mut out = tokio::io::BufWriter::new(out);
     let mut dropped = Dropped::default();
     while let Some(batch) = rx.recv().await {
         out.write_all(&batch.lines).await?;
+        room.add_permits(usize::try_from(output_cost(&batch)).unwrap_or(OUTPUT_BYTES));
         if rx.is_empty() {
             out.flush().await?;
         }
         if let Some(exporter) = &exporter
-            && let Err(full) = exporter.try_send(batch)
+            && let Err(batch) = exporter.try_send(batch)
         {
-            dropped.count(&full.into_inner().lines);
+            dropped.count(&batch.lines);
         }
     }
     out.flush().await
@@ -564,7 +634,7 @@ mod tests {
         let sandbox = tmp.path().join("0123456789abcdef");
         tokio::fs::create_dir_all(&sandbox).await.unwrap();
         let vmm = vmm(&sandbox);
-        let (tx, rx) = mpsc::channel(8);
+        let (tx, rx) = channel(8);
         let mut listeners = HashMap::new();
         scan(tmp.path(), &options(None), None, &mut listeners, &tx).await;
         assert_eq!(listeners.len(), 1);
@@ -613,7 +683,7 @@ mod tests {
             let dir = tmp.path();
             let sandbox = dir.join("0123456789abcdef");
             tokio::fs::create_dir_all(&sandbox).await.unwrap();
-            let (tx, mut rx) = mpsc::channel(8);
+            let (tx, mut rx) = channel(8);
             let mut listeners = HashMap::new();
 
             scan(dir, &options(None), None, &mut listeners, &tx).await;
@@ -690,7 +760,7 @@ mod tests {
     #[test]
     fn a_corrupt_stream_ends_with_its_reason_and_last_checkpoint() {
         runtime().block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
+            let (tx, mut rx) = channel(8);
             let (mut guest, host) = UnixStream::pair().unwrap();
             let task = tokio::spawn(receive(
                 host,
@@ -772,7 +842,7 @@ mod tests {
                 bundles: None,
                 svid: None,
             };
-            let (tx, mut rx) = mpsc::channel(8);
+            let (tx, mut rx) = channel(8);
             let _accept = tokio::spawn(accept(listener, sandbox, Format::Json, tx));
             let mut intruder = UnixStream::connect(&socket).await.unwrap();
             intruder.write_all(heartbeat().as_bytes()).await.unwrap();
@@ -862,7 +932,7 @@ mod tests {
             let sandbox = tmp.path().join("not valid");
             tokio::fs::create_dir_all(&sandbox).await.unwrap();
             let _vmm = vmm(&sandbox);
-            let (tx, _rx) = mpsc::channel(8);
+            let (tx, _rx) = channel(8);
             let mut listeners = HashMap::new();
             scan(tmp.path(), &options(None), None, &mut listeners, &tx).await;
             assert!(listeners.is_empty());
@@ -895,7 +965,7 @@ mod tests {
                 vmm(&vms.join("0123456789abcdef")),
                 vmm(&vms.join("fedcba9876543210")),
             ];
-            let (tx, mut rx) = mpsc::channel(8);
+            let (tx, mut rx) = channel(8);
             let mut listeners = HashMap::new();
             scan(&vms, &options(Some(&bundles)), None, &mut listeners, &tx).await;
             assert_eq!(listeners.len(), 2);
@@ -927,6 +997,12 @@ mod tests {
         assert!(n_b.parse::<u64>().unwrap() > n_a.parse::<u64>().unwrap());
     }
 
+    /// The writer's queue, with room for `batches` batches and plenty of bytes.
+    fn channel(batches: usize) -> (Output, mpsc::Receiver<Batch>) {
+        let (tx, rx) = mpsc::channel(batches);
+        (Output::new(tx, Arc::new(Semaphore::new(OUTPUT_BYTES))), rx)
+    }
+
     fn batch_of(lines: &str) -> Batch {
         Batch {
             origin: Arc::new(Origin::from("sb")),
@@ -938,14 +1014,23 @@ mod tests {
     #[test]
     fn the_exporter_gets_what_fits_and_stdout_gets_everything() {
         runtime().block_on(async {
-            let (tx, rx) = mpsc::channel(8);
+            let (tx, rx) = channel(8);
             let (otx, mut orx) = mpsc::channel(1);
+            let exporter = Exporter {
+                tx: otx,
+                room: Arc::new(Semaphore::new(OTLP_BYTES)),
+            };
             let (out, mut reader) = tokio::io::duplex(64 * 1024);
             for text in ["a\n", "b\nc\n", "d\n"] {
                 tx.send(batch_of(text)).await.unwrap();
             }
+            let room = Arc::clone(&tx.room);
             drop(tx);
-            write_output(rx, out, Some(otx)).await.unwrap();
+            write_output(rx, Arc::clone(&room), out, Some(exporter))
+                .await
+                .unwrap();
+            // The writer gave back the room its batches took.
+            assert_eq!(room.available_permits(), OUTPUT_BYTES);
             let mut written = String::new();
             reader.read_to_string(&mut written).await.unwrap();
             assert_eq!(written, "a\nb\nc\nd\n");
@@ -953,6 +1038,54 @@ mod tests {
             assert_eq!(orx.recv().await.unwrap().lines, b"a\n");
             assert!(orx.recv().await.is_none());
         });
+    }
+
+    #[test]
+    fn streams_wait_while_the_writer_holds_its_bytes() {
+        runtime().block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            let output = Output::new(tx, Arc::new(Semaphore::new(4)));
+            output.send(batch_of("abc\n")).await.unwrap();
+            // Room for more batches, but not for more bytes.
+            let next = output.send(batch_of("d\n"));
+            tokio::pin!(next);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut next)
+                    .await
+                    .is_err()
+            );
+            // The writer wrote the first batch and gave its room back.
+            let first = rx.recv().await.unwrap();
+            output.room.add_permits(first.lines.len());
+            within(next).await.unwrap();
+            assert_eq!(rx.recv().await.unwrap().lines, b"d\n");
+            assert_eq!(output.room.available_permits(), 2);
+        });
+    }
+
+    #[test]
+    fn the_exporter_queue_drops_what_its_bytes_do_not_fit() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let exporter = Exporter {
+            tx,
+            room: Arc::new(Semaphore::new(3)),
+        };
+        assert_eq!(
+            exporter.try_send(batch_of("a\nb\n")).unwrap_err().lines,
+            b"a\nb\n"
+        );
+        exporter.try_send(batch_of("a\n")).unwrap();
+        assert_eq!(exporter.room.available_permits(), 1);
+        assert_eq!(rx.try_recv().unwrap().lines, b"a\n");
+        // A full queue keeps its room.
+        let (tx, _rx) = mpsc::channel(1);
+        let exporter = Exporter {
+            tx,
+            room: Arc::new(Semaphore::new(8)),
+        };
+        exporter.try_send(batch_of("a\n")).unwrap();
+        assert!(exporter.try_send(batch_of("b\n")).is_err());
+        assert_eq!(exporter.room.available_permits(), 6);
     }
 
     #[test]
@@ -978,7 +1111,7 @@ mod tests {
 
     /// Runs one stream of two heartbeats through `receive` with `signing`.
     async fn one_stream(signing: Signing) -> Vec<u8> {
-        let (tx, mut rx) = mpsc::channel(8);
+        let (tx, mut rx) = channel(8);
         let (mut guest, host) = UnixStream::pair().unwrap();
         let peer = Peer {
             pid: None,

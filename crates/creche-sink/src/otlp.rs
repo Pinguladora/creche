@@ -22,7 +22,7 @@ use bytes::Bytes;
 use prost::Message as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::{Instant, timeout};
 
 use crate::json::Origin;
@@ -410,8 +410,10 @@ fn status_code(response: &[u8]) -> Option<u16> {
     parts.next()?.parse().ok()
 }
 
-/// Sends what arrives on `rx` to `endpoint` until `rx` closes.
-pub async fn export(endpoint: Endpoint, mut rx: mpsc::Receiver<Batch>) {
+/// Sends what arrives on `rx` to `endpoint` until `rx` closes. Whoever queued
+/// a batch took a permit from `room` per byte of its lines. They are given back
+/// once the batch is sent or dropped, so `room` bounds the bytes waiting here.
+pub async fn export(endpoint: Endpoint, mut rx: mpsc::Receiver<Batch>, room: Arc<Semaphore>) {
     let mut grpc = Grpc::default();
     while let Some(first) = rx.recv().await {
         let deadline = Instant::now() + FLUSH_INTERVAL;
@@ -450,6 +452,7 @@ pub async fn export(endpoint: Endpoint, mut rx: mpsc::Receiver<Batch>) {
                 }
             }
         }
+        room.add_permits(size);
     }
 }
 

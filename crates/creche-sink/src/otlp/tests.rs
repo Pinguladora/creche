@@ -23,6 +23,11 @@ fn pod_origin() -> Arc<Origin> {
 }
 
 /// A batch of `names` as sink event lines from `origin`.
+/// Room for the exporter's queue. Nothing takes from it in these tests.
+fn room() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(0))
+}
+
 fn batch(origin: &Arc<Origin>, names: &[&str], observed_ns: u64) -> Batch {
     let mut lines = Vec::new();
     for (seq, name) in (0..).zip(names) {
@@ -229,11 +234,19 @@ fn http_export_retries_until_the_collector_takes_the_lines() {
         });
         let (tx, rx) = mpsc::channel(4);
         let origin = pod_origin();
-        tx.send(batch(&origin, &["creche.stream.start"], 5))
-            .await
-            .unwrap();
+        let sent = batch(&origin, &["creche.stream.start"], 5);
+        let size = sent.lines.len();
+        tx.send(sent).await.unwrap();
         drop(tx);
-        export(Endpoint::parse(&url, Protocol::Http).unwrap(), rx).await;
+        let room = room();
+        export(
+            Endpoint::parse(&url, Protocol::Http).unwrap(),
+            rx,
+            Arc::clone(&room),
+        )
+        .await;
+        // The batch's room is given back once it was sent.
+        assert_eq!(room.available_permits(), size);
         let requests = collector.await.unwrap();
         assert_eq!(requests.len(), 2);
         let (head, body) = &requests[1];
@@ -268,7 +281,7 @@ fn http_export_gives_up_on_a_rejection() {
             .await
             .unwrap();
         drop(tx);
-        export(Endpoint::parse(&url, Protocol::Http).unwrap(), rx).await;
+        export(Endpoint::parse(&url, Protocol::Http).unwrap(), rx, room()).await;
         assert!(collector.await.unwrap());
     });
 }
@@ -316,7 +329,7 @@ fn grpc_export_sends_zstd_messages_and_retries_unavailable() {
         .await
         .unwrap();
         drop(tx);
-        export(Endpoint::parse(&url, Protocol::Grpc).unwrap(), rx).await;
+        export(Endpoint::parse(&url, Protocol::Grpc).unwrap(), rx, room()).await;
         let seen = collector.await.unwrap();
         assert_eq!(seen.len(), 2, "retried once on the same connection");
         let (parts, message) = &seen[1];
@@ -358,7 +371,7 @@ fn grpc_export_gives_up_on_a_permanent_status() {
             .await
             .unwrap();
         drop(tx);
-        export(Endpoint::parse(&url, Protocol::Grpc).unwrap(), rx).await;
+        export(Endpoint::parse(&url, Protocol::Grpc).unwrap(), rx, room()).await;
         assert!(collector.await.unwrap());
     });
 }
@@ -377,7 +390,7 @@ fn an_unreachable_collector_is_retried_then_dropped() {
             .unwrap();
         drop(tx);
         let started = Instant::now();
-        export(Endpoint::parse(&url, Protocol::Http).unwrap(), rx).await;
+        export(Endpoint::parse(&url, Protocol::Http).unwrap(), rx, room()).await;
         // Four waits between five attempts: 250 + 500 + 1000 + 2000 ms.
         assert!(started.elapsed() >= Duration::from_millis(3750));
     });
