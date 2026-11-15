@@ -242,8 +242,10 @@ impl Exporter {
     /// Queues `lines` as a piece of `batch`.
     fn send_piece(&self, batch: &Batch, lines: Vec<u8>, dropped: &mut Dropped) {
         let piece = Batch {
+            origin: Arc::clone(&batch.origin),
+            observed_ns: batch.observed_ns,
             lines,
-            ..batch.clone()
+            share: batch.share.clone(),
         };
         if let Err(piece) = self.try_send(piece) {
             dropped.count(&piece.lines);
