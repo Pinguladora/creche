@@ -33,7 +33,8 @@ usage: creche-sink [-d DIR] [-p PORT] [-b DIR | --no-pods] [-o json|raw]
       --spiffe-socket PATH  sign each stream's audit chain with the sink's X.509-SVID
                      from the SPIFFE Workload API at PATH (JSON output only)
       --verify FILE  check the audit chains in saved JSON output (- for stdin) and exit,
-                     with status 1 when a stream does not add up
+                     with status 1 when a stream does not add up, or else 3 when a
+                     stream has no end line, so lines may be missing from its end
       --bundle PEM   with --verify: require every stream to be signed by an SVID that
                      chains to this SPIFFE trust bundle (spire-server bundle show)
       --spiffe-id ID with --bundle: a sink allowed to sign, repeatable. Required, since
@@ -178,8 +179,9 @@ fn main() -> ExitCode {
             sinks,
             nodes,
         } => match verify(&file, bundle.as_ref(), sinks, nodes.as_ref()) {
-            Ok(true) => Ok(()),
-            Ok(false) => return ExitCode::from(1),
+            Ok(report) if report.complete() => Ok(()),
+            Ok(report) if report.intact() => return ExitCode::from(3),
+            Ok(_) => return ExitCode::from(1),
             Err(e) => Err(e),
         },
     };
@@ -216,13 +218,13 @@ fn read_input(file: &PathBuf) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Prints what [`audit::verify`] found in `file`. Whether every stream is intact.
+/// Prints what [`audit::verify`] found in `file`, and returns it.
 fn verify(
     file: &PathBuf,
     bundle: Option<&PathBuf>,
     sinks: Vec<String>,
     nodes: Option<&PathBuf>,
-) -> Result<bool> {
+) -> Result<audit::Report> {
     let bundle = bundle
         .map(|path| {
             let pem = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -242,7 +244,7 @@ fn verify(
         .map_err(|e| anyhow::anyhow!("--spiffe-id: {e}"))?;
     let report = audit::verify(&read_input(file)?, trust.as_ref());
     write!(io::stdout().lock(), "{report}")?;
-    Ok(report.intact())
+    Ok(report)
 }
 
 fn decode_file(file: &PathBuf, format: Format) -> Result<()> {

@@ -381,6 +381,16 @@ impl Report {
     pub fn intact(&self) -> bool {
         self.unreadable == 0 && self.streams.values().all(|s| s.problems.is_empty())
     }
+
+    /// Whether the report also shows every stream whole: intact, and ended.
+    /// A stream without its end line may have lost lines after its last
+    /// checkpoint, the end line among them, with no trace. It may also just be
+    /// running still, or its sink may have stopped, so that is no problem of
+    /// its own.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.intact() && self.streams.values().all(|s| s.ended)
+    }
 }
 
 /// The report as text, a few lines per stream. Stream ids, signers, nodes and
@@ -417,6 +427,12 @@ impl fmt::Display for Report {
                 )?,
                 None if s.signed => writeln!(f, "  signature not accepted")?,
                 None => writeln!(f, "  not signed")?,
+            }
+            if !s.ended {
+                writeln!(
+                    f,
+                    "  not ended: lines after its last checkpoint may be missing"
+                )?;
             }
             for problem in &s.problems {
                 writeln!(f, "  problem: {}", Shown(problem))?;
@@ -1118,6 +1134,34 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_cut_at_a_checkpoint_is_intact_but_not_complete() {
+        let out = stream(600);
+        let l = lines(&out);
+        // Everything after the second checkpoint goes: lines, the last
+        // checkpoint and the end line. What is left still chains.
+        let second = l
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.windows(23).any(|w| w == b"creche.audit.checkpoint"))
+            .nth(1)
+            .map(|(i, _)| i)
+            .unwrap();
+        let cut = l[..=second].concat();
+        let report = verify(&cut, None);
+        let s = &report.streams["s1"];
+        assert!(report.intact(), "{report:?}");
+        assert!(!report.complete());
+        assert!(!s.ended);
+        assert_eq!(s.lines, s.verified);
+        assert!(
+            report
+                .to_string()
+                .contains("  not ended: lines after its last checkpoint may be missing\n")
+        );
+        assert!(verify(&out, None).complete());
+    }
+
+    #[test]
     fn a_forged_checkpoint_does_not_chain() {
         let out = String::from_utf8(stream(600)).unwrap();
         let forged = out.replacen(
@@ -1208,6 +1252,7 @@ mod tests {
              0 verified by 0 checkpoints, open\n\
              \x20 signed by spiffe://x/sink\\u{202e}, trusted by the bundle, on node \
              n\\r\\n  signed by spiffe://x/other\n\
+             \x20 not ended: lines after its last checkpoint may be missing\n\
              \x20 problem: event \\u{1b}[2K\\\\n\n\
              0 lines outside any stream, 0 unreadable\n"
         );
