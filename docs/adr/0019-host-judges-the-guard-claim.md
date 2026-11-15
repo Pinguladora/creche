@@ -27,10 +27,10 @@ sandbox, and writes its verdict as `creche.observer.guarded`.
   connection only once the last one broke. A stream that still sends records
   more than 2 seconds after a newer stream of the same sandbox said hello shows
   two senders at once. Records sooner than that may be what an observer wrote
-  just before it exited, and so may records the sink read late because it held
-  the stream back itself, waiting for room in its output. Those do not count,
-  but more than 4 MiB after that hello does, however late it is read: no buffer
-  between the guest and the sink holds as much. Each stream of the sandbox then gets a
+  just before it exited. Time the sink itself held the stream back, waiting for
+  room in its output, does not count toward those 2 seconds, and more than 4 MiB
+  after that hello counts however late it is read: no buffer between the guest
+  and the sink holds as much. Each stream of the sandbox then gets a
   `creche.stream.unguarded` line, with `creche.stream.unguarded_reason`
   `concurrent_streams`, when it next sends or ends, and no later hello of the
   sandbox counts as guarded. The 2 seconds run from the first newer hello, so

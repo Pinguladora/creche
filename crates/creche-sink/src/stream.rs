@@ -55,8 +55,9 @@ struct JsonState {
     guard: Option<guard::Handle>,
     /// Whether the stream was told it no longer counts as guarded.
     unguarded: bool,
-    /// Whether the sink held the stream's next read back itself.
-    held: bool,
+    /// How long the sink held the stream's next read back itself, in
+    /// nanoseconds.
+    held_ns: u64,
 }
 
 /// Returns `*seq` and advances it.
@@ -232,19 +233,18 @@ impl StreamDecoder {
         if format == Format::Json {
             self.audit(origin, observed_ns, start, out);
             if let Some(guard) = &self.json.guard {
-                let _breached = guard.sent(observed_ns, data.len(), !self.json.held);
+                let _breached = guard.sent(observed_ns, data.len(), self.json.held_ns);
             }
             self.note_guard(origin, observed_ns, out);
         }
         result
     }
 
-    /// Whether the sink held the stream's next read back itself, waiting for
-    /// room in its output. Such a read may be late through no doing of the
-    /// guest, so it is not taken as a sign of a second sender (see
-    /// [`crate::guard`]).
-    pub const fn held_back(&mut self, held: bool) {
-        self.json.held = held;
+    /// How long the sink held the stream's next read back itself, waiting for
+    /// room in its output. That time is late through no doing of the guest, so
+    /// it does not count toward a second sender (see [`crate::guard`]).
+    pub fn held_back(&mut self, held: std::time::Duration) {
+        self.json.held_ns = u64::try_from(held.as_nanos()).unwrap_or(u64::MAX);
     }
 
     /// Says once, when two streams of the stream's sandbox were seen sending at
@@ -1156,11 +1156,12 @@ mod guard_tests {
         feed(&mut new, &hello(true));
         // The sink's output was full, so the old stream's last records are
         // read late.
-        old.held_back(true);
+        old.held_back(std::time::Duration::from_nanos(LATE));
         let lines = feed_at(&mut old, &heartbeat(), LATE);
         assert_eq!(named(&lines, "creche.stream.unguarded").len(), 0);
-        old.held_back(false);
-        let lines = feed_at(&mut old, &heartbeat(), LATE);
+        // Read promptly once more time has gone by: a second sender.
+        old.held_back(std::time::Duration::ZERO);
+        let lines = feed_at(&mut old, &heartbeat(), 2 * LATE);
         assert_eq!(named(&lines, "creche.stream.unguarded").len(), 1);
     }
 

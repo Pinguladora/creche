@@ -14,10 +14,12 @@
 //!   two senders at once, so the port is not guarded. From then on no stream of
 //!   the sandbox counts as guarded. What an observer wrote just before it
 //!   exited may still be read after its successor's hello, so sends within
-//!   [`STALE_NS`] of the first newer hello do not count, nor reads the sink
-//!   itself held back, waiting for room in its output: those may be late
-//!   through no doing of the guest. More than [`STALE_BYTES`] after that hello
-//!   counts whenever it is read, being more than any buffer holds. Each open
+//!   [`STALE_NS`] of the first newer hello do not count. Time the sink itself
+//!   held the stream back, waiting for room in its output, is left out of
+//!   those [`STALE_NS`]: its reads are late through no doing of the guest. A
+//!   stream that sends now and then still ages while it waits for input, and
+//!   more than [`STALE_BYTES`] after that hello counts however late it is
+//!   read, being more than any buffer holds. Each open
 //!   stream keeps when that hello was, so neither more hellos nor more
 //!   connections put it off.
 
@@ -75,6 +77,8 @@ struct Seen {
     since_ns: Option<u64>,
     /// Bytes the stream delivered since.
     bytes: u64,
+    /// Time since that the sink held the stream back itself, in nanoseconds.
+    held_ns: u64,
 }
 
 /// One stream's place in its sandbox's guard evidence.
@@ -102,21 +106,23 @@ impl Handle {
         claimed && first && !self.guard.breached()
     }
 
-    /// The stream delivered `bytes` at `now_ns`, in a read the sink did not
-    /// hold back when `prompt`. Returns whether two streams of the sandbox have
-    /// now been seen sending at once: since a newer stream said hello, more
-    /// than [`STALE_NS`] went by before a prompt read, or more than
-    /// [`STALE_BYTES`] came.
+    /// The stream delivered `bytes` at `now_ns`, read after the sink held it
+    /// back for `held_ns`. Returns whether two streams of the sandbox have now
+    /// been seen sending at once: since a newer stream said hello, more than
+    /// [`STALE_NS`] went by that the sink did not hold the stream back, or more
+    /// than [`STALE_BYTES`] came.
     #[must_use]
-    pub fn sent(&self, now_ns: u64, bytes: usize, prompt: bool) -> bool {
+    pub fn sent(&self, now_ns: u64, bytes: usize, held_ns: u64) -> bool {
         let mut streams = self.guard.streams();
         if let Some(seen) = streams.get_mut(&self.stream)
             && let Some(since) = seen.since_ns
         {
+            let elapsed = now_ns.saturating_sub(since);
             seen.bytes = seen
                 .bytes
                 .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
-            let late = prompt && now_ns.saturating_sub(since) > STALE_NS;
+            seen.held_ns = seen.held_ns.saturating_add(held_ns).min(elapsed);
+            let late = elapsed.saturating_sub(seen.held_ns) > STALE_NS;
             if late || seen.bytes > STALE_BYTES {
                 self.guard.breached.store(true, Ordering::SeqCst);
             }
@@ -164,13 +170,13 @@ mod tests {
         let guard = Arc::default();
         let old = Guard::open(&guard);
         assert!(old.hello(true, 0));
-        assert!(!old.sent(1, 1, true));
+        assert!(!old.sent(1, 1, 0));
         let new = Guard::open(&guard);
         assert!(new.hello(true, 10));
         // What the old observer wrote before it exited is still read.
-        assert!(!old.sent(10 + STALE_NS, 1, true));
+        assert!(!old.sent(10 + STALE_NS, 1, 0));
         drop(old);
-        assert!(!new.sent(10 + LATE, 1, true));
+        assert!(!new.sent(10 + LATE, 1, 0));
         assert!(!guard.breached());
     }
 
@@ -181,10 +187,10 @@ mod tests {
         assert!(observer.hello(true, 0));
         let intruder = Guard::open(&guard);
         assert!(intruder.hello(true, 0));
-        assert!(!intruder.sent(LATE, 1, true));
+        assert!(!intruder.sent(LATE, 1, 0));
         // The observer still sends: two senders.
-        assert!(observer.sent(LATE, 1, true));
-        assert!(intruder.sent(LATE, 1, true));
+        assert!(observer.sent(LATE, 1, 0));
+        assert!(intruder.sent(LATE, 1, 0));
         assert!(!Guard::open(&guard).hello(true, LATE));
     }
 
@@ -199,7 +205,7 @@ mod tests {
             let _taken = intruder.hello(true, i * STALE_NS / 20);
             let _taken = Guard::open(&guard).hello(true, i * STALE_NS / 20);
         }
-        assert!(observer.sent(STALE_NS / 20 + LATE, 1, true));
+        assert!(observer.sent(STALE_NS / 20 + LATE, 1, 0));
     }
 
     #[test]
@@ -210,11 +216,28 @@ mod tests {
         let new = Guard::open(&guard);
         assert!(new.hello(true, 0));
         // Read late because the sink's output was full, not the guest's doing.
-        assert!(!old.sent(LATE, 1000, false));
+        assert!(!old.sent(LATE, 1000, LATE));
         // But more than any buffer holds is a second sender, however read.
         let all = usize::try_from(STALE_BYTES).unwrap();
-        assert!(!old.sent(LATE, all - 1000, false));
-        assert!(old.sent(LATE, 1, false));
+        assert!(!old.sent(LATE, all - 1000, 0));
+        assert!(old.sent(LATE, 1, 0));
+    }
+
+    #[test]
+    fn a_sparse_stream_held_back_now_and_then_still_ages() {
+        let guard = Arc::default();
+        let old = Guard::open(&guard);
+        assert!(old.hello(true, 0));
+        let new = Guard::open(&guard);
+        assert!(new.hello(true, 0));
+        // Each send is held back a little, but the stream waits for input far
+        // longer between them.
+        let hold = STALE_NS / 10;
+        let mut breached = false;
+        for i in 1..=10 {
+            breached = old.sent(i * STALE_NS / 2, 10, hold);
+        }
+        assert!(breached);
     }
 
     #[test]
@@ -223,7 +246,7 @@ mod tests {
         let observer = Guard::open(&guard);
         assert!(observer.hello(true, 0));
         let _quiet = Guard::open(&guard);
-        assert!(!observer.sent(LATE, 1, true));
+        assert!(!observer.sent(LATE, 1, 0));
     }
 
     #[test]
