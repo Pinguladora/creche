@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 
 use crate::json::{Attribution, Origin, Value, sink_event};
 use crate::k8s::{self, Containers, Unresolved};
-use crate::otlp::{self, Batch, Endpoint};
+use crate::otlp::{self, Batch, Endpoint, Share};
 use crate::peer::{self, Refusal, Vmm};
 use crate::spiffe::{self, Svid};
 use crate::stream::{Format, StreamDecoder, now_ns};
@@ -43,6 +43,11 @@ const OTLP_BACKLOG: usize = 1024;
 /// Bytes of lines waiting for the OTLP exporter. Batches that would not fit
 /// are dropped like those beyond [`OTLP_BACKLOG`].
 const OTLP_BYTES: usize = 64 << 20; // 64 MiB
+/// Most of either queue one sandbox may hold, so that one sandbox flooding the
+/// sink leaves room for at least seven others.
+const SANDBOX_OUTPUT_BYTES: usize = OUTPUT_BYTES / 8;
+/// See [`SANDBOX_OUTPUT_BYTES`].
+const SANDBOX_OTLP_BYTES: usize = OTLP_BYTES / 8;
 /// Least time between two reports of lines the exporter dropped.
 const DROP_REPORT: Duration = Duration::from_secs(10);
 /// Read size per connection.
@@ -135,6 +140,8 @@ struct Output {
     /// A permit per byte that may still be queued. Senders take them for each
     /// batch and the writer gives them back once it wrote the batch.
     room: Arc<Semaphore>,
+    /// The share of the sending sandbox, taken from the same way.
+    share: Option<Arc<Share>>,
 }
 
 /// The writer is gone.
@@ -143,26 +150,54 @@ struct Closed;
 
 impl Output {
     const fn new(tx: mpsc::Sender<Batch>, room: Arc<Semaphore>) -> Self {
-        Self { tx, room }
+        Self {
+            tx,
+            room,
+            share: None,
+        }
     }
 
-    /// Queues `batch` for the writer, waiting until it fits.
-    async fn send(&self, batch: Batch) -> Result<(), Closed> {
+    /// The same queue, for a sandbox holding `share` of it.
+    fn for_sandbox(&self, share: Arc<Share>) -> Self {
+        Self {
+            share: Some(share),
+            ..self.clone()
+        }
+    }
+
+    /// Queues `batch` for the writer, waiting until it fits in the sandbox's
+    /// share and in the queue.
+    async fn send(&self, mut batch: Batch) -> Result<(), Closed> {
+        let shared = match &self.share {
+            Some(share) => Some(
+                share
+                    .output
+                    .acquire_many(cost(&batch, SANDBOX_OUTPUT_BYTES))
+                    .await
+                    .map_err(|_| Closed)?,
+            ),
+            None => None,
+        };
         let permits = self
             .room
-            .acquire_many(output_cost(&batch))
+            .acquire_many(cost(&batch, OUTPUT_BYTES))
             .await
             .map_err(|_| Closed)?;
+        batch.share.clone_from(&self.share);
         self.tx.send(batch).await.map_err(|_| Closed)?;
         permits.forget();
+        if let Some(shared) = shared {
+            shared.forget();
+        }
         Ok(())
     }
 }
 
-/// The permits a batch takes from the writer's queue: its bytes, or all of
-/// [`OUTPUT_BYTES`] for a larger batch, which then waits for an empty queue.
-fn output_cost(batch: &Batch) -> u32 {
-    u32::try_from(batch.lines.len().min(OUTPUT_BYTES)).unwrap_or(u32::MAX)
+/// The permits a batch takes from a queue holding at most `limit` bytes: its
+/// bytes, or all of `limit` for a larger batch, which then waits for the queue
+/// to empty.
+fn cost(batch: &Batch, limit: usize) -> u32 {
+    u32::try_from(batch.lines.len().min(limit)).unwrap_or(u32::MAX)
 }
 
 /// The OTLP exporter's queue.
@@ -175,18 +210,30 @@ struct Exporter {
 }
 
 impl Exporter {
-    /// Queues `batch` if it fits. When it does not, `batch` is handed back.
+    /// Queues `batch` if it fits, in the queue and in its sandbox's share. When
+    /// it does not, `batch` is handed back.
     fn try_send(&self, batch: Batch) -> Result<(), Batch> {
-        let permits = u32::try_from(batch.lines.len())
-            .ok()
-            .and_then(|n| self.room.try_acquire_many(n).ok());
-        let Some(permits) = permits else {
+        let Ok(n) = u32::try_from(batch.lines.len()) else {
+            return Err(batch);
+        };
+        let share = batch.share.clone();
+        let shared = match &share {
+            Some(share) => match share.export.try_acquire_many(n) {
+                Ok(permits) => Some(permits),
+                Err(_) => return Err(batch),
+            },
+            None => None,
+        };
+        let Ok(permits) = self.room.try_acquire_many(n) else {
             return Err(batch);
         };
         self.tx
             .try_send(batch)
             .map_err(mpsc::error::TrySendError::into_inner)?;
         permits.forget();
+        if let Some(shared) = shared {
+            shared.forget();
+        }
         Ok(())
     }
 }
@@ -280,6 +327,10 @@ struct Sandbox {
 }
 
 async fn accept(listener: UnixListener, sandbox: Sandbox, format: Format, tx: Output) {
+    let tx = tx.for_sandbox(Arc::new(Share::new(
+        SANDBOX_OUTPUT_BYTES,
+        SANDBOX_OTLP_BYTES,
+    )));
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     while let Ok((stream, _)) = listener.accept().await {
         let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
@@ -357,6 +408,7 @@ async fn refused(sandbox: &str, reason: &str, peer: Peer, format: Format, tx: &O
                 origin,
                 observed_ns: now,
                 lines,
+                share: None,
             })
             .await;
     }
@@ -438,6 +490,7 @@ async fn receive(
         origin: Arc::clone(&origin),
         observed_ns,
         lines,
+        share: None,
     };
     let (mut decoder, signed) = match &signing {
         Signing::With(svid) => match StreamDecoder::new(format).with_signed_audit(&id, svid) {
@@ -512,7 +565,11 @@ async fn write_output(
     let mut dropped = Dropped::default();
     while let Some(batch) = rx.recv().await {
         out.write_all(&batch.lines).await?;
-        room.add_permits(usize::try_from(output_cost(&batch)).unwrap_or(OUTPUT_BYTES));
+        let given = |limit| usize::try_from(cost(&batch, limit)).unwrap_or(limit);
+        room.add_permits(given(OUTPUT_BYTES));
+        if let Some(share) = &batch.share {
+            share.output.add_permits(given(SANDBOX_OUTPUT_BYTES));
+        }
         if rx.is_empty() {
             out.flush().await?;
         }
@@ -1008,6 +1065,7 @@ mod tests {
             origin: Arc::new(Origin::from("sb")),
             observed_ns: 1,
             lines: lines.as_bytes().to_vec(),
+            share: None,
         }
     }
 
@@ -1061,6 +1119,67 @@ mod tests {
             assert_eq!(rx.recv().await.unwrap().lines, b"d\n");
             assert_eq!(output.room.available_permits(), 2);
         });
+    }
+
+    #[test]
+    fn a_sandbox_that_fills_its_share_waits_and_others_go_on() {
+        runtime().block_on(async {
+            let (tx, rx) = mpsc::channel(8);
+            let output = Output::new(tx, Arc::new(Semaphore::new(100)));
+            let (a, b) = (Arc::new(Share::new(4, 0)), Arc::new(Share::new(4, 0)));
+            let (flood, quiet) = (output.for_sandbox(Arc::clone(&a)), output.for_sandbox(b));
+            flood.send(batch_of("abc\n")).await.unwrap();
+            let (out, _reader) = tokio::io::duplex(64);
+            let room = Arc::clone(&output.room);
+            let writer;
+            {
+                let next = flood.send(batch_of("d\n"));
+                tokio::pin!(next);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), &mut next)
+                        .await
+                        .is_err()
+                );
+                // The queue has room, so another sandbox still gets through.
+                within(quiet.send(batch_of("e\n"))).await.unwrap();
+                // The writer gives the first batch's bytes back, to the queue
+                // and to its sandbox.
+                drop((output, quiet));
+                writer = tokio::spawn(write_output(rx, Arc::clone(&room), out, None));
+                within(next).await.unwrap();
+            }
+            drop(flood);
+            within(writer).await.unwrap().unwrap();
+            assert_eq!(room.available_permits(), 100);
+            assert_eq!(a.output.available_permits(), 4);
+        });
+    }
+
+    #[test]
+    fn each_sandbox_holds_an_eighth_of_each_queue_at_most() {
+        assert_eq!(SANDBOX_OUTPUT_BYTES * 8, OUTPUT_BYTES);
+        assert_eq!(SANDBOX_OTLP_BYTES * 8, OTLP_BYTES);
+    }
+
+    #[test]
+    fn the_exporter_queue_keeps_each_sandbox_to_its_share() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let exporter = Exporter {
+            tx,
+            room: Arc::new(Semaphore::new(100)),
+        };
+        let share = Arc::new(Share::new(0, 3));
+        let mine = |lines: &str| Batch {
+            share: Some(Arc::clone(&share)),
+            ..batch_of(lines)
+        };
+        assert!(exporter.try_send(mine("a\nb\n")).is_err());
+        exporter.try_send(mine("a\n")).unwrap();
+        assert_eq!(share.export.available_permits(), 1);
+        assert_eq!(exporter.room.available_permits(), 98);
+        // Another sandbox's batch still fits.
+        exporter.try_send(batch_of("c\nd\n")).unwrap();
+        assert_eq!(rx.try_recv().unwrap().lines, b"a\n");
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //!
 //! Memory profile: allocation-conscious. Per connection, one read buffer, at
 //! most one incomplete record and the lines one read renders to. Lines waiting
-//! for the writer, and for the OTLP exporter, are bounded in bytes.
+//! for the writer, and for the OTLP exporter, are bounded in bytes, and each
+//! sandbox may hold an eighth of either at most.
 
 pub mod audit;
 pub mod json;

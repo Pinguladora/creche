@@ -22,12 +22,12 @@ fn pod_origin() -> Arc<Origin> {
     Arc::new(Origin::new("sb1", &Attribution::Pod(pod)).with_stream("18e6-0"))
 }
 
-/// A batch of `names` as sink event lines from `origin`.
 /// Room for the exporter's queue. Nothing takes from it in these tests.
 fn room() -> Arc<tokio::sync::Semaphore> {
     Arc::new(tokio::sync::Semaphore::new(0))
 }
 
+/// A batch of `names` as sink event lines from `origin`.
 fn batch(origin: &Arc<Origin>, names: &[&str], observed_ns: u64) -> Batch {
     let mut lines = Vec::new();
     for (seq, name) in (0..).zip(names) {
@@ -38,6 +38,7 @@ fn batch(origin: &Arc<Origin>, names: &[&str], observed_ns: u64) -> Batch {
         origin: Arc::clone(origin),
         observed_ns,
         lines,
+        share: None,
     }
 }
 
@@ -234,7 +235,11 @@ fn http_export_retries_until_the_collector_takes_the_lines() {
         });
         let (tx, rx) = mpsc::channel(4);
         let origin = pod_origin();
-        let sent = batch(&origin, &["creche.stream.start"], 5);
+        let share = Arc::new(Share::new(0, 0));
+        let sent = Batch {
+            share: Some(Arc::clone(&share)),
+            ..batch(&origin, &["creche.stream.start"], 5)
+        };
         let size = sent.lines.len();
         tx.send(sent).await.unwrap();
         drop(tx);
@@ -245,8 +250,10 @@ fn http_export_retries_until_the_collector_takes_the_lines() {
             Arc::clone(&room),
         )
         .await;
-        // The batch's room is given back once it was sent.
+        // The batch's room is given back once it was sent, to the queue and
+        // to its sandbox.
         assert_eq!(room.available_permits(), size);
+        assert_eq!(share.export.available_permits(), size);
         let requests = collector.await.unwrap();
         assert_eq!(requests.len(), 2);
         let (head, body) = &requests[1];
