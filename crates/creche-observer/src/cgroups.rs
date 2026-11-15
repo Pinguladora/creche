@@ -121,7 +121,9 @@ impl Cgroups {
         self.defer(id);
     }
 
-    fn defer(&mut self, id: u64) {
+    /// Describes cgroup `id` once a walk may run (see [`Self::take_ready`]),
+    /// if it is not described by then.
+    pub fn defer(&mut self, id: u64) {
         if self.deferred.len() < MAX_CGROUPS {
             self.deferred.insert(id);
         }
@@ -402,6 +404,16 @@ mod tests {
         // The other waits for the next walk.
         assert!(cgroups.deferring());
         assert_eq!(cgroups.take_ready(cgroups.next_walk_ns), [u64::MAX]);
+    }
+
+    #[test]
+    fn deferring_a_described_cgroup_keeps_it_described() {
+        let (tmp, tool) = tree();
+        let mut cgroups = Cgroups::new(tmp.path());
+        assert!(cgroups.describe(ino(&tool), 1, 1).is_some());
+        cgroups.defer(ino(&tool));
+        assert_eq!(cgroups.take_ready(2), [ino(&tool)]);
+        assert!(cgroups.describe(ino(&tool), 1, 2).is_none());
     }
 
     #[test]

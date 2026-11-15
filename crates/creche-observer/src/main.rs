@@ -277,8 +277,8 @@ fn forward_deferred(queue: &mut RecordQueue, cgroups: &mut Cgroups, pid: u32) {
             let _counted = queue.push(description);
         }
     }
-    // What did not fit waits again.
+    // What was not reached waits again, as it was.
     for id in ready {
-        cgroups.retract(id);
+        cgroups.defer(id);
     }
 }
