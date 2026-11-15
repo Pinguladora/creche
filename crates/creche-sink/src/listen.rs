@@ -22,6 +22,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::guard::Guard;
 use crate::json::{Attribution, Origin, Value, sink_event};
 use crate::k8s::{self, Containers, Unresolved};
 use crate::otlp::{self, Batch, Endpoint, Share};
@@ -333,6 +334,7 @@ async fn scan(
             vmm,
             bundles: options.bundles.as_deref().map(Arc::from),
             svid: svid.cloned(),
+            guard: Arc::default(),
         };
         let task = tokio::spawn(accept(listener, sandbox, options.format, tx.clone()));
         listeners.insert(name, Listener { task, socket });
@@ -366,6 +368,17 @@ struct Sandbox {
     bundles: Option<Arc<Path>>,
     /// The SVID to sign its streams with, when signing.
     svid: Option<SvidWatch>,
+    /// What its streams showed of the observer's guard, for judging the next.
+    guard: Arc<Guard>,
+}
+
+/// What a stream's lines are checked against, beyond the stream itself.
+#[derive(Debug, Default)]
+struct Checks {
+    /// The containers of the sandbox's pod, when it is known.
+    containers: Option<Containers>,
+    /// The guard evidence of the sandbox's streams.
+    guard: Arc<Guard>,
 }
 
 async fn accept(listener: UnixListener, sandbox: Sandbox, format: Format, tx: Output) {
@@ -419,7 +432,11 @@ async fn admit(
                     .clone()
                     .map_or(Signing::Waiting, Signing::With),
             };
-            receive(stream, origin, containers, peer, signing, format, tx).await;
+            let checks = Checks {
+                containers,
+                guard: Arc::clone(&sandbox.guard),
+            };
+            receive(stream, origin, checks, peer, signing, format, tx).await;
         }
         Err(refusal) => refused(&sandbox.id, &refusal.to_string(), peer, format, &tx).await,
     }
@@ -520,7 +537,7 @@ async fn origin(sandbox: &Sandbox) -> (Origin, Option<Containers>) {
 async fn receive(
     mut stream: UnixStream,
     origin: Origin,
-    containers: Option<Containers>,
+    checks: Checks,
     peer: Peer,
     signing: Signing,
     format: Format,
@@ -548,9 +565,10 @@ async fn receive(
         }
         Signing::Off => (StreamDecoder::new(format).with_audit(), Vec::new()),
     };
-    if let Some(containers) = containers {
+    if let Some(containers) = checks.containers {
         decoder = decoder.with_containers(containers);
     }
+    decoder = decoder.with_guard(checks.guard);
     let mut fields = peer.fields();
     fields.extend(signed.iter().map(|(k, v)| (*k, Value::Str(v))));
     let mut lines = Vec::new();
@@ -879,7 +897,7 @@ mod tests {
             let task = tokio::spawn(receive(
                 host,
                 Origin::from("sb"),
-                None,
+                Checks::default(),
                 Peer {
                     pid: None,
                     uid: None,
@@ -955,6 +973,7 @@ mod tests {
                 vmm: Vmm::init(uid),
                 bundles: None,
                 svid: None,
+                guard: Arc::default(),
             };
             let (tx, mut rx) = channel(8);
             let _accept = tokio::spawn(accept(listener, sandbox, Format::Json, tx));
@@ -1326,7 +1345,7 @@ mod tests {
         let task = tokio::spawn(receive(
             host,
             Origin::from("sb"),
-            None,
+            Checks::default(),
             peer,
             signing,
             Format::Json,

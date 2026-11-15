@@ -44,8 +44,10 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   refuses the observer's vsock port to every other guest process, so a workload
   cannot send records the host would take for the observer's. The guard counts
   the connects it sees, the observer's own included, so the observer knows it
-  runs and says so in its hello record (`creche.observer.guarded`). Kernels
-  without BPF LSM still work, reported as unguarded.
+  runs and says so in its hello record. The sink takes that claim only when the
+  sandbox's first hello made it too and no two of its streams send at once, and
+  writes its verdict as `creche.observer.guarded`. Kernels without BPF LSM still
+  work, reported as unguarded.
 - **Whole records only.** The forwarding queue is bounded and never splits a record
   across connections. Heartbeats report drops so silence can be told from blindness.
 - **The host attests the sandbox.** Each sandbox's socket is mode 0600, owned by

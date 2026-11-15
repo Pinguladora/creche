@@ -10,6 +10,7 @@ examine_globs = [
     "crates/creche-sink/src/tasks.rs",
     "crates/creche-sink/src/listen.rs",
     "crates/creche-sink/src/audit.rs",
+    "crates/creche-sink/src/guard.rs",
     "crates/creche-sink/src/otlp.rs",
     "crates/creche-sink/src/peer.rs",
     "crates/creche-sink/src/k8s.rs",

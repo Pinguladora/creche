@@ -8,6 +8,7 @@
 //! sandbox may hold an eighth of either at most.
 
 pub mod audit;
+pub mod guard;
 pub mod json;
 pub mod k8s;
 pub mod listen;
