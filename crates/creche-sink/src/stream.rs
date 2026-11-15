@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use creche_wire::{Body, DecodeError, HelloFlags, Record, Records};
 
 use crate::audit::Chain;
-use crate::guard::Guard;
+use crate::guard::{self, Guard};
 use crate::json::{self, Cgroup, Origin, Value};
 use crate::k8s::Containers;
 use crate::tasks::{Cgroups, TaskInfo, Tasks};
@@ -52,7 +52,7 @@ struct JsonState {
     seq: u64,
     /// The guard evidence of the stream's sandbox, and the stream's number in
     /// it, when the sink judges guard claims.
-    guard: Option<(Arc<Guard>, u64)>,
+    guard: Option<guard::Handle>,
     /// Whether the stream was told it no longer counts as guarded.
     unguarded: bool,
 }
@@ -77,8 +77,8 @@ fn render(
     let task = state.tasks.get(record.header.pid);
     let cgroup = task.and_then(|t| state.cgroups.get(t.cgroup_id));
     let guarded = match (&record.body, &state.guard) {
-        (Body::Hello { flags, .. }, Some((guard, stream))) => {
-            Some(guard.hello(*stream, flags.contains(HelloFlags::GUARDED), observed_ns))
+        (Body::Hello { flags, .. }, Some(guard)) => {
+            Some(guard.hello(flags.contains(HelloFlags::GUARDED), observed_ns))
         }
         _ => None,
     };
@@ -106,9 +106,8 @@ impl StreamDecoder {
     /// Also judges the guard claims of the stream's hellos against what
     /// `guard` saw of its sandbox's other streams (see [`crate::guard`]).
     #[must_use]
-    pub fn with_guard(mut self, guard: Arc<Guard>) -> Self {
-        let stream = guard.open();
-        self.json.guard = Some((guard, stream));
+    pub fn with_guard(mut self, guard: &Arc<Guard>) -> Self {
+        self.json.guard = Some(Guard::open(guard));
         self
     }
 
@@ -230,8 +229,8 @@ impl StreamDecoder {
         };
         if format == Format::Json {
             self.audit(origin, observed_ns, start, out);
-            if let Some((guard, stream)) = &self.json.guard {
-                guard.sent(*stream, observed_ns);
+            if let Some(guard) = &self.json.guard {
+                let _breached = guard.sent(observed_ns);
             }
             self.note_guard(origin, observed_ns, out);
         }
@@ -247,7 +246,7 @@ impl StreamDecoder {
             .json
             .guard
             .as_ref()
-            .is_some_and(|(guard, _)| guard.breached());
+            .is_some_and(guard::Handle::breached);
         if breached && !self.json.unguarded {
             self.json.unguarded = true;
             self.event(
@@ -1019,7 +1018,7 @@ mod guard_tests {
     fn stream(guard: &Arc<Guard>) -> StreamDecoder {
         StreamDecoder::new(Format::Json)
             .with_audit()
-            .with_guard(Arc::clone(guard))
+            .with_guard(guard)
     }
 
     /// Late enough after a newer hello to count as a second sender.

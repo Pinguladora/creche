@@ -14,16 +14,16 @@
 //!   two senders at once, so the port is not guarded. From then on no stream of
 //!   the sandbox counts as guarded. What an observer wrote just before it
 //!   exited may still be read after its successor's hello, so sends within
-//!   [`STALE_NS`] of the first newer hello do not count.
+//!   [`STALE_NS`] of the first newer hello do not count. Each open stream keeps
+//!   when that was, so neither more hellos nor more connections put it off.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// How long after a newer stream's hello an older stream may still deliver
 /// what it was sent before, in nanoseconds.
 pub const STALE_NS: u64 = 2_000_000_000;
-/// Hellos remembered, for the streams still open. A sandbox has at most a few.
-const HELLOS: usize = 16;
 
 /// The guard evidence of one sandbox, shared by its streams.
 #[derive(Debug, Default)]
@@ -32,53 +32,82 @@ pub struct Guard {
     first: OnceLock<bool>,
     /// The next stream's number.
     next: AtomicU64,
-    /// When the latest streams said hello: stream number and host clock.
-    hellos: Mutex<Vec<(u64, u64)>>,
+    /// The open streams by number, each with when a newer stream first said
+    /// hello, on the host clock. Only open streams, so it stays small.
+    open: Mutex<HashMap<u64, Option<u64>>>,
     /// Whether two streams were seen sending at once.
     breached: AtomicBool,
 }
 
 impl Guard {
-    /// A number for a new stream of the sandbox, in the order they open.
-    pub fn open(&self) -> u64 {
-        self.next.fetch_add(1, Ordering::SeqCst)
+    /// A new stream of the sandbox. It counts as open until the handle drops.
+    pub fn open(guard: &Arc<Self>) -> Handle {
+        let stream = guard.next.fetch_add(1, Ordering::SeqCst);
+        guard.streams().insert(stream, None);
+        Handle {
+            guard: Arc::clone(guard),
+            stream,
+        }
     }
 
-    /// Stream `stream` said hello at `now_ns`, claiming the port is guarded or
-    /// not. Returns whether the sink takes it as guarded: it claims so, the
-    /// sandbox's first hello claimed so, and no two streams sent at once.
-    pub fn hello(&self, stream: u64, claimed: bool, now_ns: u64) -> bool {
-        let first = *self.first.get_or_init(|| claimed);
-        let mut hellos = self.hellos.lock().unwrap_or_else(PoisonError::into_inner);
-        if hellos.len() >= HELLOS {
-            hellos.remove(0);
-        }
-        hellos.push((stream, now_ns));
-        drop(hellos);
-        claimed && first && !self.breached()
-    }
-
-    /// Stream `stream` sent records at `now_ns`. Returns whether two streams of
-    /// the sandbox have now been seen sending at once: a newer stream said
-    /// hello more than [`STALE_NS`] before.
-    pub fn sent(&self, stream: u64, now_ns: u64) -> bool {
-        let hellos = self.hellos.lock().unwrap_or_else(PoisonError::into_inner);
-        let first_newer = hellos
-            .iter()
-            .filter(|&&(other, _)| other > stream)
-            .map(|&(_, at)| at)
-            .min();
-        drop(hellos);
-        if first_newer.is_some_and(|at| now_ns.saturating_sub(at) > STALE_NS) {
-            self.breached.store(true, Ordering::SeqCst);
-        }
-        self.breached()
+    fn streams(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Option<u64>>> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether two streams of the sandbox were seen sending at once.
     #[must_use]
     pub fn breached(&self) -> bool {
         self.breached.load(Ordering::SeqCst)
+    }
+}
+
+/// One stream's place in its sandbox's guard evidence.
+#[derive(Debug)]
+pub struct Handle {
+    guard: Arc<Guard>,
+    stream: u64,
+}
+
+impl Handle {
+    /// The stream said hello at `now_ns`, claiming the port is guarded or not.
+    /// Returns whether the sink takes it as guarded: it claims so, the
+    /// sandbox's first hello claimed so, and no two streams sent at once.
+    #[must_use]
+    pub fn hello(&self, claimed: bool, now_ns: u64) -> bool {
+        let first = *self.guard.first.get_or_init(|| claimed);
+        for (_, seen) in self
+            .guard
+            .streams()
+            .iter_mut()
+            .filter(|(older, _)| **older < self.stream)
+        {
+            seen.get_or_insert(now_ns);
+        }
+        claimed && first && !self.guard.breached()
+    }
+
+    /// The stream sent records at `now_ns`. Returns whether two streams of the
+    /// sandbox have now been seen sending at once: a newer stream said hello
+    /// more than [`STALE_NS`] before.
+    #[must_use]
+    pub fn sent(&self, now_ns: u64) -> bool {
+        let seen = self.guard.streams().get(&self.stream).copied().flatten();
+        if seen.is_some_and(|at| now_ns.saturating_sub(at) > STALE_NS) {
+            self.guard.breached.store(true, Ordering::SeqCst);
+        }
+        self.guard.breached()
+    }
+
+    /// Whether two streams of the sandbox were seen sending at once.
+    #[must_use]
+    pub fn breached(&self) -> bool {
+        self.guard.breached()
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.guard.streams().remove(&self.stream);
     }
 }
 
@@ -91,74 +120,79 @@ mod tests {
 
     #[test]
     fn the_first_hello_decides_what_later_ones_may_claim() {
-        let guard = Guard::default();
-        let (a, b) = (guard.open(), guard.open());
-        assert!(!guard.hello(a, false, 0));
+        let guard = Arc::default();
+        let (a, b) = (Guard::open(&guard), Guard::open(&guard));
+        assert!(!a.hello(false, 0));
         // A later claim of a guard the first hello did not have is not taken.
-        assert!(!guard.hello(b, true, 0));
-        let guard = Guard::default();
-        let (a, b) = (guard.open(), guard.open());
-        assert!(guard.hello(a, true, 0));
-        assert!(guard.hello(b, true, 0));
-        assert!(!guard.hello(b, false, 0));
+        assert!(!b.hello(true, 0));
+        let guard = Arc::default();
+        let (a, b) = (Guard::open(&guard), Guard::open(&guard));
+        assert!(a.hello(true, 0));
+        assert!(b.hello(true, 0));
+        assert!(!b.hello(false, 0));
     }
 
     #[test]
     fn a_restarted_observer_is_one_sender() {
-        let guard = Guard::default();
-        let old = guard.open();
-        assert!(guard.hello(old, true, 0));
-        assert!(!guard.sent(old, 1));
-        let new = guard.open();
-        assert!(guard.hello(new, true, 10));
+        let guard = Arc::default();
+        let old = Guard::open(&guard);
+        assert!(old.hello(true, 0));
+        assert!(!old.sent(1));
+        let new = Guard::open(&guard);
+        assert!(new.hello(true, 10));
         // What the old observer wrote before it exited is still read.
-        assert!(!guard.sent(old, 10 + STALE_NS));
-        assert!(!guard.sent(new, 10 + LATE));
+        assert!(!old.sent(10 + STALE_NS));
+        drop(old);
+        assert!(!new.sent(10 + LATE));
         assert!(!guard.breached());
     }
 
     #[test]
     fn an_older_stream_sending_well_after_a_newer_hello_is_a_second_sender() {
-        let guard = Guard::default();
-        let observer = guard.open();
-        assert!(guard.hello(observer, true, 0));
-        let intruder = guard.open();
-        assert!(guard.hello(intruder, true, 0));
-        assert!(!guard.sent(intruder, LATE));
+        let guard = Arc::default();
+        let observer = Guard::open(&guard);
+        assert!(observer.hello(true, 0));
+        let intruder = Guard::open(&guard);
+        assert!(intruder.hello(true, 0));
+        assert!(!intruder.sent(LATE));
         // The observer still sends: two senders.
-        assert!(guard.sent(observer, LATE));
-        assert!(guard.sent(intruder, LATE));
-        assert!(!guard.hello(guard.open(), true, LATE));
+        assert!(observer.sent(LATE));
+        assert!(intruder.sent(LATE));
+        assert!(!Guard::open(&guard).hello(true, LATE));
     }
 
     #[test]
-    fn new_hellos_do_not_put_off_the_verdict() {
-        let guard = Guard::default();
-        let observer = guard.open();
-        assert!(guard.hello(observer, true, 0));
-        // An intruder reconnecting again and again: the first newer hello
-        // counts.
-        for i in 1..5 {
-            guard.hello(guard.open(), true, i * STALE_NS / 2);
+    fn more_hellos_and_connections_do_not_put_off_the_verdict() {
+        let guard = Arc::default();
+        let observer = Guard::open(&guard);
+        assert!(observer.hello(true, 0));
+        // An intruder saying hello again and again, and reconnecting.
+        let intruder = Guard::open(&guard);
+        for i in 1..40 {
+            let _taken = intruder.hello(true, i * STALE_NS / 20);
+            let _taken = Guard::open(&guard).hello(true, i * STALE_NS / 20);
         }
-        assert!(guard.sent(observer, 2 * STALE_NS));
+        assert!(observer.sent(STALE_NS / 20 + LATE));
     }
 
     #[test]
     fn streams_that_have_not_said_hello_do_not_count() {
-        let guard = Guard::default();
-        let observer = guard.open();
-        assert!(guard.hello(observer, true, 0));
-        let _quiet = guard.open();
-        assert!(!guard.sent(observer, LATE));
+        let guard = Arc::default();
+        let observer = Guard::open(&guard);
+        assert!(observer.hello(true, 0));
+        let _quiet = Guard::open(&guard);
+        assert!(!observer.sent(LATE));
     }
 
     #[test]
-    fn only_the_latest_hellos_are_kept() {
-        let guard = Guard::default();
-        for _ in 0..HELLOS + 4 {
-            guard.hello(guard.open(), true, 0);
+    fn only_open_streams_are_kept() {
+        let guard: Arc<Guard> = Arc::default();
+        let kept = Guard::open(&guard);
+        for _ in 0..20 {
+            let _taken = Guard::open(&guard).hello(true, 0);
         }
-        assert_eq!(guard.hellos.lock().unwrap().len(), HELLOS);
+        assert_eq!(guard.streams().len(), 1);
+        drop(kept);
+        assert_eq!(guard.streams().len(), 0);
     }
 }

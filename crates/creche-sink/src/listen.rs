@@ -568,7 +568,7 @@ async fn receive(
     if let Some(containers) = checks.containers {
         decoder = decoder.with_containers(containers);
     }
-    decoder = decoder.with_guard(checks.guard);
+    decoder = decoder.with_guard(&checks.guard);
     let mut fields = peer.fields();
     fields.extend(signed.iter().map(|(k, v)| (*k, Value::Str(v))));
     let mut lines = Vec::new();
