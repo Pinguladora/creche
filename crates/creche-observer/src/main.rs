@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use creche_wire::{
-    HEARTBEAT_LEN, HELLO_LEN, Header, HeartbeatRecord, HelloFlags, HelloRecord, Kind, VERSION,
-    peek_cgroup_id,
+    HEARTBEAT_LEN, HELLO_LEN, Header, HeartbeatRecord, HelloFlags, HelloRecord, Kind,
+    MAX_RECORD_LEN, VERSION, peek_cgroup_id,
 };
 use nix::errno::Errno;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
@@ -179,7 +179,7 @@ fn run(args: &Args) -> Result<()> {
         // drained in between, that record would wait for the heartbeat, so
         // after a drain that found records, sleep at most one more window.
         let mut wait = next_beat.saturating_duration_since(Instant::now());
-        if drained || cgroups.deferring() {
+        if drained || (cgroups.deferring() && queue.fits(MAX_RECORD_LEN)) {
             wait = wait.min(args.batch_window);
         }
         let timeout = EpollTimeout::try_from(wait).unwrap_or(EpollTimeout::NONE);
@@ -261,15 +261,19 @@ fn forward(queue: &mut RecordQueue, cgroups: &mut Cgroups, record: &[u8], pid: u
 
 /// Queues the descriptions of cgroups whose walk had to wait, once it may run.
 /// Lines from then on carry their paths and labels, though no record named them
-/// again. One that does not fit waits for the next batch.
+/// again. While the queue has no room they keep waiting, not counted as lost.
 fn forward_deferred(queue: &mut RecordQueue, cgroups: &mut Cgroups, pid: u32) {
+    if !queue.fits(MAX_RECORD_LEN) {
+        return;
+    }
     let now = metrics::boottime_ns();
     while let Some((id, description)) = cgroups.next_deferred(pid, now) {
-        if let Some(description) = description
-            && !queue.push(description)
-        {
-            cgroups.retract(id);
-            return;
+        if let Some(description) = description {
+            if !queue.fits(description.len()) {
+                cgroups.retract(id);
+                return;
+            }
+            let _counted = queue.push(description);
         }
     }
 }

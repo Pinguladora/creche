@@ -137,7 +137,13 @@ impl Cgroups {
     /// `None` once none waits, or while the ones waiting need a walk that may
     /// not run yet.
     pub fn next_deferred(&mut self, pid: u32, ts_ns: u64) -> Option<(u64, Option<&[u8]>)> {
-        let &id = self.deferred.iter().next()?;
+        // Those known since the last walk first: they need no other.
+        let id = self
+            .deferred
+            .iter()
+            .find(|id| self.paths.contains_key(id))
+            .or_else(|| self.deferred.iter().next())
+            .copied()?;
         if !self.paths.contains_key(&id) && ts_ns < self.next_walk_ns {
             return None;
         }
@@ -388,6 +394,22 @@ mod tests {
         cgroups.retract(id);
         let (_, record) = cgroups.next_deferred(1, later).unwrap();
         assert!(record.is_some());
+    }
+
+    #[test]
+    fn known_cgroups_waiting_go_before_those_needing_a_walk() {
+        let (tmp, tool) = tree();
+        let mut cgroups = Cgroups::new(tmp.path());
+        assert!(cgroups.describe(ino(&tool), 1, 1).is_some());
+        // One known cgroup and one found nowhere wait together.
+        cgroups.retract(ino(&tool));
+        assert!(cgroups.describe(u64::MAX, 1, 2).is_none());
+        let (id, record) = cgroups.next_deferred(1, 3).unwrap();
+        assert_eq!(id, ino(&tool));
+        assert!(record.is_some());
+        // The other waits for the next walk.
+        assert!(cgroups.next_deferred(1, 3).is_none());
+        assert!(cgroups.deferring());
     }
 
     #[test]
