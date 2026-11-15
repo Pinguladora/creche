@@ -22,7 +22,7 @@
 //! file of sink output.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::io::{self, Read as _};
 use std::mem;
 
@@ -380,6 +380,71 @@ impl Report {
     #[must_use]
     pub fn intact(&self) -> bool {
         self.unreadable == 0 && self.streams.values().all(|s| s.problems.is_empty())
+    }
+}
+
+/// The report as text, a few lines per stream. Stream ids, signers, nodes and
+/// problems come from the archive, so they are shown escaped (see [`Shown`]).
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (stream, s) in &self.streams {
+            writeln!(
+                f,
+                "stream {}: {} lines, {} verified by {} checkpoints, {}",
+                Shown(stream),
+                s.lines,
+                s.verified,
+                s.checkpoints,
+                if s.ended { "ended" } else { "open" }
+            )?;
+            if s.duplicates > 0 {
+                writeln!(f, "  {} repeated deliveries dropped", s.duplicates)?;
+            }
+            match &s.signer {
+                Some(id) if s.trusted => match &s.node {
+                    Some(node) => writeln!(
+                        f,
+                        "  signed by {}, trusted by the bundle, on node {}",
+                        Shown(id),
+                        Shown(node)
+                    )?,
+                    None => writeln!(f, "  signed by {}, trusted by the bundle", Shown(id))?,
+                },
+                Some(id) => writeln!(
+                    f,
+                    "  signed by {}, not checked against a trust bundle",
+                    Shown(id)
+                )?,
+                None if s.signed => writeln!(f, "  signature not accepted")?,
+                None => writeln!(f, "  not signed")?,
+            }
+            for problem in &s.problems {
+                writeln!(f, "  problem: {}", Shown(problem))?;
+            }
+        }
+        writeln!(
+            f,
+            "{} lines outside any stream, {} unreadable",
+            self.outside, self.unreadable
+        )
+    }
+}
+
+/// Text from the archive as a report shows it: printable ASCII as it is, and
+/// anything else, a backslash included, escaped. A tampered archive can then
+/// neither add lines to the report nor send control sequences to a terminal.
+struct Shown<'a>(&'a str);
+
+impl fmt::Display for Shown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for c in self.0.chars() {
+            if c == ' ' || (c.is_ascii_graphic() && c != '\\') {
+                f.write_char(c)?;
+            } else {
+                write!(f, "{}", c.escape_default())?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1106,6 +1171,46 @@ mod tests {
         let report = verify(&out, None);
         assert_eq!((report.outside, report.unreadable), (1, 1));
         assert!(!report.intact());
+    }
+
+    #[test]
+    fn reports_show_one_stream_per_line_group() {
+        let report = verify(&stream(2), None);
+        assert_eq!(
+            report.to_string(),
+            "stream s1: 3 lines, 3 verified by 1 checkpoints, ended\n  not signed\n\
+             0 lines outside any stream, 0 unreadable\n"
+        );
+    }
+
+    #[test]
+    fn archive_text_cannot_add_report_lines() {
+        // A tampered archive chooses stream ids, signers, nodes and the event
+        // names problems quote.
+        let forged = StreamReport {
+            signer: Some("spiffe://x/sink\u{202e}".to_owned()),
+            trusted: true,
+            node: Some("n\r\n  signed by spiffe://x/other".to_owned()),
+            problems: vec!["event \u{1b}[2K\\n".to_owned()],
+            ..StreamReport::default()
+        };
+        let report = Report {
+            streams: [(
+                "s1: 1 lines, 1 verified by 1 checkpoints, ended\nstream s2".to_owned(),
+                forged,
+            )]
+            .into(),
+            ..Report::default()
+        };
+        assert_eq!(
+            report.to_string(),
+            "stream s1: 1 lines, 1 verified by 1 checkpoints, ended\\nstream s2: 0 lines, \
+             0 verified by 0 checkpoints, open\n\
+             \x20 signed by spiffe://x/sink\\u{202e}, trusted by the bundle, on node \
+             n\\r\\n  signed by spiffe://x/other\n\
+             \x20 problem: event \\u{1b}[2K\\\\n\n\
+             0 lines outside any stream, 0 unreadable\n"
+        );
     }
 
     fn svid(chain: &[u8]) -> Svid {
