@@ -391,6 +391,15 @@ mod tests {
     }
 
     #[test]
+    fn the_cgroups_waiting_stay_bounded() {
+        let mut cgroups = Cgroups::new(std::env::temp_dir());
+        for id in 0..=u64::try_from(MAX_CGROUPS).unwrap() {
+            cgroups.retract(id);
+        }
+        assert_eq!(cgroups.deferred.len(), MAX_CGROUPS);
+    }
+
+    #[test]
     fn the_walk_and_the_ids_described_stay_bounded() {
         let tmp = tempfile::tempdir().unwrap();
         for i in 0..MAX_CGROUPS + 10 {
