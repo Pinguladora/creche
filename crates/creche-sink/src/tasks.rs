@@ -28,8 +28,6 @@ pub struct TaskInfo {
     /// The pod's container the guest claims for that cgroup, when the host
     /// confirms it belongs to this sandbox.
     pub container: Option<Arc<Container>>,
-    /// The cgroup's path and labels, when the observer described it.
-    pub cgroup_info: Option<Arc<Cgroup>>,
 }
 
 impl TaskInfo {
@@ -44,7 +42,6 @@ impl TaskInfo {
             comm: lossy(context.comm),
             cgroup: lossy(cgroup),
             container: None,
-            cgroup_info: None,
         }
     }
 }
@@ -57,17 +54,19 @@ fn lossy(bytes: &[u8]) -> Arc<str> {
 /// one stream from growing the sink without end.
 const MAX_CGROUPS: usize = 4096;
 
-/// The cgroups a stream's observer described, by id.
+/// The cgroups a stream's observer described, by id. Processes refer to theirs
+/// by id and it is looked up for each line, so no description outlives its
+/// place here and the bound holds for all of them.
 #[derive(Debug, Default)]
 pub struct Cgroups {
-    by_id: HashMap<u64, Arc<Cgroup>>,
+    by_id: HashMap<u64, Cgroup>,
 }
 
 impl Cgroups {
     /// The cgroup `id`, if the observer described it.
     #[must_use]
-    pub fn get(&self, id: u64) -> Option<Arc<Cgroup>> {
-        self.by_id.get(&id).cloned()
+    pub fn get(&self, id: u64) -> Option<&Cgroup> {
+        self.by_id.get(&id)
     }
 
     /// Records the cgroup `id`, replacing any earlier description.
@@ -78,7 +77,7 @@ impl Cgroups {
         {
             self.by_id.remove(&evict);
         }
-        self.by_id.insert(id, Arc::new(cgroup));
+        self.by_id.insert(id, cgroup);
     }
 }
 
@@ -121,15 +120,9 @@ impl Tasks {
     /// follows from it, which only task records carry. The guest sends one
     /// first when the cgroup changed.
     pub fn exec(&mut self, pid: u32, context: &Context<'_>) {
-        let (cgroup, container, cgroup_info) = self.by_pid.get(&pid).map_or_else(
-            || (Arc::from(""), None, None),
-            |known| {
-                (
-                    Arc::clone(&known.cgroup),
-                    known.container.clone(),
-                    known.cgroup_info.clone(),
-                )
-            },
+        let (cgroup, container) = self.by_pid.get(&pid).map_or_else(
+            || (Arc::from(""), None),
+            |known| (Arc::clone(&known.cgroup), known.container.clone()),
         );
         let comm = match self.by_pid.get(&pid) {
             Some(known) if known.comm.as_bytes() == context.comm => Arc::clone(&known.comm),
@@ -144,7 +137,6 @@ impl Tasks {
                 comm,
                 cgroup,
                 container,
-                cgroup_info,
             },
         );
     }
@@ -173,7 +165,6 @@ mod tests {
             comm: comm.into(),
             cgroup: "cri-containerd-x.scope".into(),
             container: None,
-            cgroup_info: None,
         }
     }
 

@@ -3,7 +3,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use creche_wire::{Body, DecodeError, Records};
+use creche_wire::{Body, DecodeError, Record, Records};
 
 use crate::audit::Chain;
 use crate::json::{self, Cgroup, Origin, Value};
@@ -55,6 +55,21 @@ fn next(seq: &mut u64) -> u64 {
     let current = *seq;
     *seq = current.saturating_add(1);
     current
+}
+
+/// Renders `record` with what the stream knows of its process and of the
+/// process's cgroup.
+fn render(
+    origin: &Origin,
+    record: &Record<'_>,
+    state: &JsonState,
+    observed_ns: u64,
+    seq: u64,
+    out: &mut Vec<u8>,
+) {
+    let task = state.tasks.get(record.header.pid);
+    let cgroup = task.and_then(|t| state.cgroups.get(t.cgroup_id));
+    json::render(origin, record, task, cgroup, observed_ns, seq, out);
 }
 
 impl StreamDecoder {
@@ -242,14 +257,13 @@ fn render_all(
         match record.body {
             Body::Task { context, cgroup } => {
                 let mut info = TaskInfo::new(&context, cgroup);
-                info.cgroup_info = state.cgroups.get(context.cgroup_id);
                 if let Some(containers) = state.containers.as_mut() {
                     // The path, when known, names the container a nested
                     // cgroup sits in. The leaf name alone does not.
-                    let scope = info
-                        .cgroup_info
-                        .as_ref()
-                        .map_or(&*info.cgroup, |c| c.container_scope());
+                    let scope = state
+                        .cgroups
+                        .get(context.cgroup_id)
+                        .map_or(&*info.cgroup, Cgroup::container_scope);
                     info.container = containers.claim(scope);
                 }
                 state.tasks.set(pid, info);
@@ -265,21 +279,21 @@ fn render_all(
             Body::Exec { context, .. } => {
                 state.tasks.exec(pid, &context);
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
             }
             Body::Fork { ppid } => {
                 state.tasks.fork(ppid, pid);
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
             }
             Body::Exit { .. } => {
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
                 state.tasks.exit(pid);
             }
             _ => {
                 let seq = next(&mut state.seq);
-                json::render(origin, &record, state.tasks.get(pid), observed_ns, seq, out);
+                render(origin, &record, state, observed_ns, seq, out);
             }
         }
     }
@@ -658,6 +672,28 @@ mod tests {
         ] {
             assert_eq!(field(v, k), None, "{k}");
         }
+    }
+
+    #[test]
+    fn lines_take_their_cgroups_latest_description() {
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        // Processes hold no description of their own: the stream keeps one per
+        // cgroup, however many processes and descriptions the guest sends.
+        let data = [
+            cgroup(5, 0, "/a", &[("name", "first")]),
+            task_in(10, 1, &sh, 5, b"a\0"),
+            fork(11, 10),
+            cgroup(5, 0, "/a", &[("name", "second")]),
+            fork(12, 10),
+        ]
+        .concat();
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let l = lines(&out);
+        assert_eq!(l[0]["creche.guest.agent.name"], "first");
+        assert_eq!(l[1]["creche.guest.agent.name"], "second");
     }
 
     #[test]

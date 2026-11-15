@@ -194,7 +194,8 @@ pub fn sink_event(
 }
 
 /// Appends `record`, from `origin`, to `out` as one JSON object and a newline.
-/// `task` is the context of the record's process, when the stream reported it.
+/// `task` is the context of the record's process, when the stream reported it,
+/// and `cgroup` the description of its cgroup, when the observer sent one.
 /// `observed_ns` is the host's wall clock when the record arrived, in nanoseconds
 /// since the Unix epoch: the guest only knows its own boot-time clock.
 ///
@@ -206,6 +207,7 @@ pub fn render(
     origin: &Origin,
     record: &Record<'_>,
     task: Option<&TaskInfo>,
+    cgroup: Option<&Cgroup>,
     observed_ns: u64,
     seq: u64,
     out: &mut Vec<u8>,
@@ -223,7 +225,7 @@ pub fn render(
         line.str(key!("process.executable.name"), &t.comm);
         line.num(key!("creche.cgroup.id"), t.cgroup_id);
         line.str(key!("creche.cgroup.name"), &t.cgroup);
-        if let Some(c) = &t.cgroup_info {
+        if let Some(c) = cgroup {
             line.out.extend_from_slice(&c.json);
         }
         if let Some(c) = &t.container {
@@ -495,7 +497,6 @@ mod tests {
             comm: "wget".into(),
             cgroup: "cri-containerd-x.scope".into(),
             container: None,
-            cgroup_info: None,
         }
     }
 
@@ -508,6 +509,7 @@ mod tests {
                 body,
             },
             task,
+            None,
             42,
             0,
             &mut out,
@@ -717,6 +719,7 @@ mod tests {
                 body: Body::Unknown { body: b"abc" },
             },
             None,
+            None,
             42,
             0,
             &mut out,
@@ -833,6 +836,7 @@ mod tests {
                 body: Body::Fork { ppid: 1 },
             },
             None,
+            None,
             42,
             0,
             &mut out,
@@ -876,6 +880,7 @@ mod tests {
                 header: header(Kind::Fork),
                 body: Body::Fork { ppid: 1 },
             },
+            None,
             None,
             42,
             0,
