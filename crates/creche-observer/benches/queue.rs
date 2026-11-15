@@ -32,7 +32,7 @@ fn queue(c: &mut Criterion) {
     group.bench_function("push_and_flush_batch", |b| {
         b.iter(|| {
             for record in records.iter().cycle().take(batch) {
-                queue.push(black_box(record));
+                let _ = queue.push(black_box(record));
             }
             black_box(queue.flush(&mut io::sink()).is_ok())
         });
@@ -66,7 +66,7 @@ fn cgroups(c: &mut Criterion) {
     // Each variant has a queue of its own, grown before measuring.
     let warm = |queue: &mut RecordQueue| {
         for record in &records {
-            queue.push(record);
+            black_box(queue.push(record));
         }
         let _ = queue.flush(&mut io::sink());
     };
@@ -82,12 +82,12 @@ fn cgroups(c: &mut Criterion) {
         b.iter(|| {
             for record in &records {
                 let record = black_box(record);
-                if let Some(description) =
-                    peek_cgroup_id(record).and_then(|id| cgroups.describe(id, 1, 1))
+                let queued = match peek_cgroup_id(record).and_then(|id| cgroups.describe(id, 1, 1))
                 {
-                    queue.push(description);
-                }
-                queue.push(record);
+                    Some(description) => queue.push_pair(description, record),
+                    None => queue.push(record),
+                };
+                black_box(queued);
             }
             black_box(queue.flush(&mut io::sink()).is_ok())
         });
@@ -97,7 +97,7 @@ fn cgroups(c: &mut Criterion) {
     group.bench_function("forward_stream", |b| {
         b.iter(|| {
             for record in &records {
-                queue.push(black_box(record));
+                let _ = queue.push(black_box(record));
             }
             black_box(queue.flush(&mut io::sink()).is_ok())
         });
