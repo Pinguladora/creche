@@ -366,8 +366,16 @@ mod tests {
         // Its next record, later, finds it.
         let later = 1 + MIN_WALK_GAP_NS * 1000;
         assert!(cgroups.describe(ino(&late), 1, later).is_some());
-        // A gap of at least MIN_WALK_GAP_NS follows each walk.
+        // A gap of at least MIN_WALK_GAP_NS follows each walk, and a walk may
+        // run once it is over.
         assert!(cgroups.next_walk_ns >= later + MIN_WALK_GAP_NS);
+        let last = tool.join("last");
+        fs::create_dir(&last).unwrap();
+        assert!(
+            cgroups
+                .describe(ino(&last), 1, cgroups.next_walk_ns)
+                .is_some()
+        );
     }
 
     #[test]

@@ -92,6 +92,11 @@ fn endpoints_default_their_port_and_path() {
         parse("http://[::1]:5000", Protocol::Grpc),
         ok("[::1]:5000", "/v1/logs")
     );
+    // The last colon of an address without a port is inside the brackets.
+    assert_eq!(
+        parse("http://[fe80::a:1]", Protocol::Grpc),
+        ok("[fe80::a:1]:4317", "/v1/logs")
+    );
     assert!(
         parse("https://otel:4317", Protocol::Grpc)
             .unwrap_err()
@@ -403,7 +408,82 @@ fn an_unreachable_collector_is_retried_then_dropped() {
         drop(tx);
         let started = Instant::now();
         export(Endpoint::parse(&url, Protocol::Http).unwrap(), rx, room()).await;
-        // Four waits between five attempts: 250 + 500 + 1000 + 2000 ms.
+        // Four waits between five attempts: 250 + 500 + 1000 + 2000 ms, and
+        // none after the last.
         assert!(started.elapsed() >= Duration::from_millis(3750));
+        assert!(started.elapsed() < Duration::from_millis(6000));
+    });
+}
+
+/// A collector that answers every request with `status` and counts them.
+async fn counting_collector(status: &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http(&mut stream).await;
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+            stream.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    (url, count)
+}
+
+#[test]
+fn http_statuses_decide_whether_to_retry() {
+    runtime().block_on(async {
+        for (status, outcome) in [
+            ("200 OK", Outcome::Accepted),
+            ("204 No Content", Outcome::Accepted),
+            ("503 Busy", Outcome::Retry("http status 503".to_owned())),
+            (
+                "400 Bad Request",
+                Outcome::Rejected("http status 400".to_owned()),
+            ),
+        ] {
+            let (url, _) = counting_collector(status).await;
+            let endpoint = Endpoint::parse(&url, Protocol::Http).unwrap();
+            assert_eq!(send_http(&endpoint, b"x").await, outcome, "{status}");
+        }
+    });
+}
+
+/// The requests a collector got for `batches`, the second sent `gap` after
+/// the first.
+async fn requests_for(first: Batch, second: Batch, gap: Duration) -> usize {
+    let (url, count) = counting_collector("200 OK").await;
+    let (tx, rx) = mpsc::channel(4);
+    tx.send(first).await.unwrap();
+    tokio::spawn(async move {
+        tokio::time::sleep(gap).await;
+        tx.send(second).await.unwrap();
+    });
+    export(Endpoint::parse(&url, Protocol::Http).unwrap(), rx, room()).await;
+    count.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn lines_within_the_flush_interval_share_a_request_up_to_its_size() {
+    runtime().block_on(async {
+        let origin = pod_origin();
+        let small = || batch(&origin, &["creche.stream.start"], 5);
+        // Sent apart, but within the flush interval: one request.
+        assert_eq!(
+            requests_for(small(), small(), Duration::from_millis(100)).await,
+            1
+        );
+        // A first batch that fills a request goes alone.
+        let mut full = small();
+        let pad = MAX_REQUEST - full.lines.len();
+        full.lines.splice(
+            1..1,
+            format!("\"pad\":\"{}\",", "p".repeat(pad - 9)).into_bytes(),
+        );
+        assert_eq!(full.lines.len(), MAX_REQUEST);
+        assert_eq!(requests_for(full, small(), Duration::ZERO).await, 2);
     });
 }
