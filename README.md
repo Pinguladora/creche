@@ -206,9 +206,11 @@ the pipelines they already feed.
   key (`creche.audit.sig`) and names the next one (`creche.audit.next_key`),
   derived from the current key and the checkpoint hash, and the current key is
   then erased. Whoever takes over the sink later cannot sign earlier checkpoints
-  again. The sink marks itself not dumpable, so other processes of its user, the
-  VMM's when it runs as that, can neither trace it nor read the keys from its
-  memory. `creche-sink --verify FILE --bundle bundle.pem --spiffe-id ID` checks that
+  again. The sink marks itself not dumpable as it starts, so other processes of
+  its user, the VMM's when it runs as that, can neither trace it nor read the
+  keys from its memory. One that attached before that could keep it dumpable, so
+  run the sink as its own user, or where its user cannot trace other processes
+  (Yama `ptrace_scope` 1 or more). `creche-sink --verify FILE --bundle bundle.pem --spiffe-id ID` checks that
   every stream is signed by one of the given sink SPIFFE IDs, with an SVID that
   chained to the trust bundle at the stream's start. The IDs are required: any
   other workload in the trust domain has an SVID too.
