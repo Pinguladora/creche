@@ -2,8 +2,10 @@
 //! listening on every sandbox's socket. The binary in `main.rs` is the command
 //! line around it, and the benchmarks use it directly.
 //!
-//! Memory profile: allocation-conscious. Per connection, one read buffer plus
-//! at most one incomplete record. Output batches are bounded by a channel.
+//! Memory profile: allocation-conscious. Per connection, one read buffer, at
+//! most one incomplete record and the lines one read renders to. Lines waiting
+//! for the writer, and for the OTLP exporter, are bounded in bytes, and each
+//! sandbox may hold an eighth of either at most.
 
 pub mod audit;
 pub mod json;

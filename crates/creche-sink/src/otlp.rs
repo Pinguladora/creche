@@ -22,7 +22,7 @@ use bytes::Bytes;
 use prost::Message as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::{Instant, timeout};
 
 use crate::json::Origin;
@@ -127,6 +127,31 @@ pub struct Batch {
     pub observed_ns: u64,
     /// Whole lines, each ending in a newline.
     pub lines: Vec<u8>,
+    /// The share of the queues its sandbox holds, which gets the batch's bytes
+    /// back as they leave each queue.
+    pub share: Option<Arc<Share>>,
+}
+
+/// One sandbox's part of the queues. A permit per byte the sandbox may have
+/// waiting in each, so a sandbox that floods them leaves room for the others.
+#[derive(Debug)]
+pub struct Share {
+    /// For the writer's queue.
+    pub output: Semaphore,
+    /// For the exporter's queue.
+    pub export: Semaphore,
+}
+
+impl Share {
+    /// A share of `output` bytes of the writer's queue and `export` bytes of
+    /// the exporter's.
+    #[must_use]
+    pub fn new(output: usize, export: usize) -> Self {
+        Self {
+            output: Semaphore::new(output),
+            export: Semaphore::new(export),
+        }
+    }
 }
 
 /// The OTLP messages used here, a subset of `opentelemetry/proto` with the same
@@ -410,8 +435,11 @@ fn status_code(response: &[u8]) -> Option<u16> {
     parts.next()?.parse().ok()
 }
 
-/// Sends what arrives on `rx` to `endpoint` until `rx` closes.
-pub async fn export(endpoint: Endpoint, mut rx: mpsc::Receiver<Batch>) {
+/// Sends what arrives on `rx` to `endpoint` until `rx` closes. Whoever queued
+/// a batch took a permit from `room`, and from its sandbox's share, per byte of
+/// its lines. They are given back once the batch is sent or dropped, so `room`
+/// and the shares bound the bytes waiting here.
+pub async fn export(endpoint: Endpoint, mut rx: mpsc::Receiver<Batch>, room: Arc<Semaphore>) {
     let mut grpc = Grpc::default();
     while let Some(first) = rx.recv().await {
         let deadline = Instant::now() + FLUSH_INTERVAL;
@@ -448,6 +476,12 @@ pub async fn export(endpoint: Endpoint, mut rx: mpsc::Receiver<Batch>) {
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2);
                 }
+            }
+        }
+        room.add_permits(size);
+        for batch in &batches {
+            if let Some(share) = &batch.share {
+                share.export.add_permits(batch.lines.len());
             }
         }
     }
