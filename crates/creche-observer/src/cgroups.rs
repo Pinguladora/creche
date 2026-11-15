@@ -115,7 +115,7 @@ impl Cgroups {
     }
 
     /// Forgets that cgroup `id` was described, when its description did not
-    /// reach the queue, and describes it again soon (see [`Self::next_deferred`]).
+    /// reach the queue, and describes it again soon (see [`Self::take_ready`]).
     pub fn retract(&mut self, id: u64) {
         self.described.remove(&id);
         self.defer(id);
@@ -133,22 +133,18 @@ impl Cgroups {
         !self.deferred.is_empty()
     }
 
-    /// One deferred cgroup, at `ts_ns`, and its record if it still needs one.
-    /// `None` once none waits, or while the ones waiting need a walk that may
-    /// not run yet.
-    pub fn next_deferred(&mut self, pid: u32, ts_ns: u64) -> Option<(u64, Option<&[u8]>)> {
-        // Those known since the last walk first: they need no other.
-        let id = self
+    /// The deferred cgroups that can be described at `ts_ns`, which stop
+    /// waiting: those known since the last walk, and the others too once a
+    /// walk may run. One pass, however many wait.
+    pub fn take_ready(&mut self, ts_ns: u64) -> Vec<u64> {
+        let walk = ts_ns >= self.next_walk_ns;
+        let paths = &self.paths;
+        let (ready, waiting): (Vec<u64>, Vec<u64>) = self
             .deferred
-            .iter()
-            .find(|id| self.paths.contains_key(id))
-            .or_else(|| self.deferred.iter().next())
-            .copied()?;
-        if !self.paths.contains_key(&id) && ts_ns < self.next_walk_ns {
-            return None;
-        }
-        self.deferred.remove(&id);
-        Some((id, self.describe(id, pid, ts_ns)))
+            .drain()
+            .partition(|id| walk || paths.contains_key(id));
+        self.deferred.extend(waiting);
+        ready
     }
 
     /// Forgets what the host was told, for a new connection or after records
@@ -382,18 +378,16 @@ mod tests {
         assert!(cgroups.describe(ino(&late), 1, 2).is_none());
         assert!(cgroups.deferring());
         // Not before the gap is over.
-        assert!(cgroups.next_deferred(1, 3).is_none());
+        assert_eq!(cgroups.take_ready(3), []);
         let later = cgroups.next_walk_ns;
-        let (id, record) = cgroups.next_deferred(1, later).unwrap();
-        assert_eq!(id, ino(&late));
-        assert_eq!(decoded(record.unwrap()).0, "/pod/ctr/agent/tool/late");
+        assert_eq!(cgroups.take_ready(later), [ino(&late)]);
         assert!(!cgroups.deferring());
-        assert!(cgroups.next_deferred(1, later).is_none());
+        let record = cgroups.describe(ino(&late), 1, later).unwrap();
+        assert_eq!(decoded(record).0, "/pod/ctr/agent/tool/late");
         // A description that did not reach the queue waits again. Known now,
         // it needs no walk.
-        cgroups.retract(id);
-        let (_, record) = cgroups.next_deferred(1, later).unwrap();
-        assert!(record.is_some());
+        cgroups.retract(ino(&late));
+        assert_eq!(cgroups.take_ready(later), [ino(&late)]);
     }
 
     #[test]
@@ -404,12 +398,10 @@ mod tests {
         // One known cgroup and one found nowhere wait together.
         cgroups.retract(ino(&tool));
         assert!(cgroups.describe(u64::MAX, 1, 2).is_none());
-        let (id, record) = cgroups.next_deferred(1, 3).unwrap();
-        assert_eq!(id, ino(&tool));
-        assert!(record.is_some());
+        assert_eq!(cgroups.take_ready(3), [ino(&tool)]);
         // The other waits for the next walk.
-        assert!(cgroups.next_deferred(1, 3).is_none());
         assert!(cgroups.deferring());
+        assert_eq!(cgroups.take_ready(cgroups.next_walk_ns), [u64::MAX]);
     }
 
     #[test]

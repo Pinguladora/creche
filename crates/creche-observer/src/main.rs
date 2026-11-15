@@ -267,13 +267,18 @@ fn forward_deferred(queue: &mut RecordQueue, cgroups: &mut Cgroups, pid: u32) {
         return;
     }
     let now = metrics::boottime_ns();
-    while let Some((id, description)) = cgroups.next_deferred(pid, now) {
-        if let Some(description) = description {
+    let mut ready = cgroups.take_ready(now).into_iter();
+    for id in ready.by_ref() {
+        if let Some(description) = cgroups.describe(id, pid, now) {
             if !queue.fits(description.len()) {
                 cgroups.retract(id);
-                return;
+                break;
             }
             let _counted = queue.push(description);
         }
+    }
+    // What did not fit waits again.
+    for id in ready {
+        cgroups.retract(id);
     }
 }
