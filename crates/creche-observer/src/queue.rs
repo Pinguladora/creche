@@ -92,6 +92,12 @@ impl RecordQueue {
         true
     }
 
+    /// Whether `len` more bytes fit, without counting anything as dropped.
+    #[must_use]
+    pub fn fits(&self, len: usize) -> bool {
+        self.queued_bytes().saturating_add(len) <= self.capacity
+    }
+
     /// Unsent bytes, including any partially sent record.
     #[must_use]
     pub fn queued_bytes(&self) -> usize {
@@ -267,6 +273,15 @@ mod tests {
             out.written,
             [rec(40, 1), rec(40, 2), rec(16, 7), rec(16, 8)].concat()
         );
+    }
+
+    #[test]
+    fn fitting_is_asked_without_dropping() {
+        let mut q = RecordQueue::new(100);
+        assert!(q.push(&rec(60, 1)));
+        assert!(q.fits(40));
+        assert!(!q.fits(41));
+        assert_eq!(q.dropped_bytes(), 0);
     }
 
     #[test]
