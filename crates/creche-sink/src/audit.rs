@@ -1228,6 +1228,62 @@ mod tests {
     }
 
     #[test]
+    fn reports_say_how_each_stream_was_signed() {
+        let report = Report {
+            streams: [
+                (
+                    "q\"'".to_owned(),
+                    StreamReport {
+                        ended: true,
+                        duplicates: 2,
+                        signed: true,
+                        signer: Some("spiffe://x/sink".to_owned()),
+                        ..StreamReport::default()
+                    },
+                ),
+                (
+                    "r".to_owned(),
+                    StreamReport {
+                        ended: true,
+                        signed: true,
+                        ..StreamReport::default()
+                    },
+                ),
+            ]
+            .into(),
+            ..Report::default()
+        };
+        assert_eq!(
+            report.to_string(),
+            "stream q\"': 0 lines, 0 verified by 0 checkpoints, ended\n\
+             \x20 2 repeated deliveries dropped\n\
+             \x20 signed by spiffe://x/sink, not checked against a trust bundle\n\
+             stream r: 0 lines, 0 verified by 0 checkpoints, ended\n\
+             \x20 signature not accepted\n\
+             0 lines outside any stream, 0 unreadable\n"
+        );
+    }
+
+    #[test]
+    fn the_first_checkpoint_hashes_zeroes_then_its_lines() {
+        let out = stream(0);
+        let l = lines(&out);
+        let checkpoint: serde_json::Value = serde_json::from_slice(l[1]).unwrap();
+        let mut expected = Sha256::new();
+        expected.update([0; 32]);
+        expected.update(l[0]);
+        assert_eq!(checkpoint["creche.audit.hash"], hex(&expected.finalize()));
+    }
+
+    #[test]
+    fn a_chain_never_shows_its_key() {
+        let (_, chain) = signed_stream(1, &sink_svid());
+        let shown = format!("{chain:?}");
+        assert!(shown.contains("Ratchet { stream: \"s1\", .. }"), "{shown}");
+        assert!(!shown.contains("SigningKey"), "{shown}");
+    }
+
+    #[test]
     fn archive_text_cannot_add_report_lines() {
         // A tampered archive chooses stream ids, signers, nodes and the event
         // names problems quote.

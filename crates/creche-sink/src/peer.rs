@@ -96,10 +96,8 @@ impl Vmm {
     pub async fn probe(vsock: &Path) -> io::Result<Self> {
         let stream = UnixStream::connect(vsock).await?;
         let cred = stream.peer_cred()?;
-        let pid = cred
-            .pid()
-            .filter(|&pid| pid > 0)
-            .ok_or_else(|| io::Error::other("the listener's pid is unknown"))?;
+        let pid =
+            known(cred.pid()).ok_or_else(|| io::Error::other("the listener's pid is unknown"))?;
         let handle = match getsockopt(&stream, PeerPidfd) {
             Ok(pidfd) => Some(pidfd),
             // Only a kernel without the option falls back. EINVAL says the
@@ -157,7 +155,7 @@ impl Vmm {
 ///
 /// The reason the peer is refused.
 pub fn check(pid: Option<i32>, uid: u32, vmm: &Vmm) -> Result<(), Refusal> {
-    let pid = pid.filter(|&pid| pid > 0).ok_or(Refusal::NoPid)?;
+    let pid = known(pid).ok_or(Refusal::NoPid)?;
     if uid != vmm.uid {
         return Err(Refusal::Uid {
             peer: uid,
@@ -180,6 +178,12 @@ async fn still_listening(vsock: &Path, pid: i32) -> io::Result<bool> {
 fn exited(pidfd: &OwnedFd) -> io::Result<bool> {
     let mut fds = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
     Ok(poll(&mut fds, PollTimeout::ZERO)? > 0)
+}
+
+/// A pid the kernel reported, if it names a process. It reports 0 for a process
+/// outside the receiver's pid namespace.
+fn known(pid: Option<i32>) -> Option<i32> {
+    pid.filter(|&pid| pid > 0)
 }
 
 /// When `pid` started, from field 22 of `/proc/<pid>/stat`. The fields are
@@ -223,6 +227,8 @@ mod tests {
             let listener = UnixListener::bind(&vsock).unwrap();
             let vmm = Vmm::probe(&vsock).await.unwrap();
             assert_eq!((vmm.pid, vmm.uid), (pid, uid));
+            let gid = fs::metadata(&vsock).unwrap().gid();
+            assert_eq!((vmm.uid(), vmm.gid()), (uid, gid));
             assert_eq!(check(Some(pid), uid, &vmm), Ok(()));
             assert_eq!(check(None, uid, &vmm), Err(Refusal::NoPid));
             assert_eq!(check(Some(0), uid, &vmm), Err(Refusal::NoPid));
