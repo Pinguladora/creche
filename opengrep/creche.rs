@@ -57,6 +57,12 @@ impl Cgroups {
         self.described.insert(id);
     }
 
+    fn reported(&mut self, id: u64) {
+        // ruleid: unbounded-insert
+        self.described.insert(id);
+        gauge(self.described.len());
+    }
+
     fn remember(&mut self, id: u64) {
         // ok: unbounded-insert
         self.paths.push(id);
@@ -118,6 +124,18 @@ fn head(endpoint: &Endpoint, body: &[u8]) -> String {
 fn inline(status: &str) -> String {
     // ruleid: interpolated-protocol-head
     format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n")
+}
+
+fn into_writer(&mut self, status: &str) {
+    // ruleid: interpolated-protocol-head
+    write!(self.out, "HTTP/1.1 {status}\r\n");
+    // ruleid: interpolated-protocol-head
+    write!(&mut buf, "X-Status: {}\r\n", status);
+}
+
+fn with_spec(host: &str) -> String {
+    // ruleid: interpolated-protocol-head
+    format!("Host: {host:>8}\r\n")
 }
 
 fn fixed() -> String {
