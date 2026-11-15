@@ -6,11 +6,12 @@
 //! periodically and each gets its own listener.
 //!
 //! Only the sandbox's own VMM may connect (see [`crate::peer`]), so a sandbox id
-//! in the output is attested by the host.
+//! in the output is attested by the host. The VMM is the process the kernel
+//! reports listening on the sandbox's vsock socket when the listener starts.
 
 use std::collections::HashMap;
 use std::io;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -24,7 +25,7 @@ use tokio::task::JoinHandle;
 use crate::json::{Attribution, Origin, Value, sink_event};
 use crate::k8s::{self, Containers, Unresolved};
 use crate::otlp::{self, Batch, Endpoint};
-use crate::peer::{self, Refusal};
+use crate::peer::{self, Refusal, Vmm};
 use crate::spiffe::{self, Svid};
 use crate::stream::{Format, StreamDecoder, now_ns};
 
@@ -148,9 +149,8 @@ async fn scan(
             continue;
         }
         let sandbox = dir.join(&name);
-        let vsock = sandbox.join("clh.sock");
-        // Only once the VMM has created its vsock socket.
-        let Ok(vmm) = tokio::fs::symlink_metadata(&vsock).await else {
+        // Only once the VMM listens on its vsock socket. The kernel names it.
+        let Ok(vmm) = Vmm::probe(&sandbox.join("clh.sock")).await else {
             continue;
         };
         let socket = sandbox.join(format!("clh.sock_{}", options.port));
@@ -168,7 +168,7 @@ async fn scan(
         eprintln!("creche-sink: listening for sandbox {}", short(&name));
         let sandbox = Sandbox {
             id: Arc::from(name.as_str()),
-            vsock: Arc::from(vsock),
+            vmm,
             bundles: options.bundles.as_deref().map(Arc::from),
             svid: svid.cloned(),
         };
@@ -187,8 +187,8 @@ fn valid_id(id: &str) -> bool {
 }
 
 /// Lets only the VMM's user connect to `socket`. The peer check refuses other
-/// processes anyway; this keeps them from getting that far.
-fn restrict(socket: &Path, vmm: &std::fs::Metadata) -> io::Result<()> {
+/// processes anyway. This keeps them from getting that far.
+fn restrict(socket: &Path, vmm: &Vmm) -> io::Result<()> {
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     std::os::unix::fs::chown(socket, Some(vmm.uid()), Some(vmm.gid()))
 }
@@ -198,8 +198,8 @@ fn restrict(socket: &Path, vmm: &std::fs::Metadata) -> io::Result<()> {
 struct Sandbox {
     /// The sandbox directory's name.
     id: Arc<str>,
-    /// Its VMM's listening vsock socket.
-    vsock: Arc<Path>,
+    /// Its VMM, the only process it accepts connections from.
+    vmm: Vmm,
     /// Where to look up its pod.
     bundles: Option<Arc<Path>>,
     /// The SVID to sign its streams with, when signing.
@@ -235,8 +235,8 @@ async fn admit(
     let (pid, uid) = (cred.and_then(|c| c.pid()), cred.map(|c| c.uid()));
     let verdict = match uid {
         Some(uid) => {
-            let vsock = Arc::clone(&sandbox.vsock);
-            tokio::task::spawn_blocking(move || peer::check(pid, uid, &vsock))
+            let vmm = sandbox.vmm;
+            tokio::task::spawn_blocking(move || peer::check(pid, uid, &vmm))
                 .await
                 .unwrap_or(Err(Refusal::Io(io::ErrorKind::Other)))
         }
@@ -500,6 +500,7 @@ mod tests {
     use super::*;
     use creche_wire::{HEARTBEAT_LEN, Header, HeartbeatRecord, Kind};
     use std::future::Future;
+    use std::os::unix::fs::MetadataExt as _;
     use tokio::io::AsyncRead;
     use zerocopy::IntoBytes as _;
 
@@ -552,26 +553,17 @@ mod tests {
         std::os::unix::net::UnixListener::bind(sandbox.join("clh.sock")).unwrap()
     }
 
-    /// One listening sandbox under a fresh directory, served by `vmm` or not.
-    async fn listening(
-        serve: bool,
-    ) -> (
+    /// One listening sandbox under a fresh directory, served by `vmm`.
+    async fn listening() -> (
         tempfile::TempDir,
-        Option<std::os::unix::net::UnixListener>,
+        std::os::unix::net::UnixListener,
         HashMap<String, Listener>,
         mpsc::Receiver<Batch>,
     ) {
         let tmp = test_dir();
         let sandbox = tmp.path().join("0123456789abcdef");
         tokio::fs::create_dir_all(&sandbox).await.unwrap();
-        let vmm = if serve {
-            Some(vmm(&sandbox))
-        } else {
-            tokio::fs::write(sandbox.join("clh.sock"), b"")
-                .await
-                .unwrap();
-            None
-        };
+        let vmm = vmm(&sandbox);
         let (tx, rx) = mpsc::channel(8);
         let mut listeners = HashMap::new();
         scan(tmp.path(), &options(None), None, &mut listeners, &tx).await;
@@ -626,6 +618,14 @@ mod tests {
 
             scan(dir, &options(None), None, &mut listeners, &tx).await;
             assert!(listeners.is_empty(), "no clh.sock yet");
+            tokio::fs::write(sandbox.join("clh.sock"), b"")
+                .await
+                .unwrap();
+            scan(dir, &options(None), None, &mut listeners, &tx).await;
+            assert!(listeners.is_empty(), "nobody listens on clh.sock");
+            tokio::fs::remove_file(sandbox.join("clh.sock"))
+                .await
+                .unwrap();
 
             let _vmm = vmm(&sandbox);
             scan(dir, &options(None), None, &mut listeners, &tx).await;
@@ -760,10 +760,21 @@ mod tests {
     #[test]
     fn only_the_sandbox_vmm_may_connect() {
         runtime().block_on(async {
-            // The vsock socket exists, but no process serves it: whoever
-            // connects is not the VMM.
-            let (tmp, _vmm, _listeners, mut rx) = listening(false).await;
-            let mut intruder = connect(&tmp).await;
+            // Another process is the sandbox's VMM, so this one is not, even
+            // as the same user.
+            let tmp = test_dir();
+            let socket = tmp.path().join("clh.sock_7000");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let uid = std::fs::metadata(tmp.path()).unwrap().uid();
+            let sandbox = Sandbox {
+                id: Arc::from("0123456789abcdef"),
+                vmm: Vmm::init(uid),
+                bundles: None,
+                svid: None,
+            };
+            let (tx, mut rx) = mpsc::channel(8);
+            let _accept = tokio::spawn(accept(listener, sandbox, Format::Json, tx));
+            let mut intruder = UnixStream::connect(&socket).await.unwrap();
             intruder.write_all(heartbeat().as_bytes()).await.unwrap();
             assert!(closed(&mut intruder).await);
             // Reported, with the intruder's pid, outside any stream.
@@ -785,7 +796,7 @@ mod tests {
     #[test]
     fn a_sandbox_takes_a_limited_number_of_connections() {
         runtime().block_on(async {
-            let (tmp, _vmm, _listeners, mut rx) = listening(true).await;
+            let (tmp, _vmm, _listeners, mut rx) = listening().await;
             let mut open = Vec::new();
             for _ in 0..MAX_CONNECTIONS {
                 let mut guest = connect(&tmp).await;

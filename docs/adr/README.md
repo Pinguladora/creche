@@ -31,6 +31,7 @@ and other documents are welcome.
 | [0015 The observer guards its vsock port with BPF LSM](0015-observer-guards-its-port.md) | Accepted |
 | [0016 Streams are bound to the node their sandbox ran on](0016-streams-bound-to-their-node.md) | Accepted |
 | [0017 Agents label their cgroups with extended attributes](0017-agent-labels.md) | Accepted |
+| [0018 The kernel names the VMM](0018-kernel-names-the-vmm.md) | Accepted |
 
 ## Writing a record
 
