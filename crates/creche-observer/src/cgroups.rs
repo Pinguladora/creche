@@ -84,6 +84,12 @@ impl Cgroups {
         self.record.get(..len)
     }
 
+    /// Forgets that cgroup `id` was described, when its description did not
+    /// reach the queue.
+    pub fn retract(&mut self, id: u64) {
+        self.described.remove(&id);
+    }
+
     /// Forgets what the host was told, for a new connection or after records
     /// were lost.
     pub fn forget(&mut self) {
@@ -233,6 +239,8 @@ mod tests {
             )
         );
         assert!(cgroups.describe(ino(agent), 7, 2).is_none());
+        cgroups.retract(ino(agent));
+        assert!(cgroups.describe(ino(agent), 7, 2).is_some());
         cgroups.forget();
         assert!(cgroups.describe(ino(agent), 7, 3).is_some());
     }

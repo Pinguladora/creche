@@ -199,12 +199,19 @@ fn run(args: &Args) -> Result<()> {
                 // A cgroup the host has not heard of on this connection is
                 // described first, so its path and labels apply from the
                 // record that names it.
-                let described = peek_cgroup_id(&record)
-                    .and_then(|id| cgroups.describe(id, pid, metrics::boottime_ns()));
-                if let Some(description) = described {
-                    queue.push(description);
+                //
+                // A refused record is counted as dropped, and the heartbeat
+                // reports it. Then cgroups are described again from the next
+                // batch on.
+                let id = peek_cgroup_id(&record);
+                let described = id.and_then(|id| cgroups.describe(id, pid, metrics::boottime_ns()));
+                let queued = match described {
+                    Some(description) => queue.push_pair(description, &record),
+                    None => queue.push(&record),
+                };
+                if !queued && let Some(id) = id {
+                    cgroups.retract(id);
                 }
-                queue.push(&record);
             }
         }
         if Instant::now() >= next_beat {
@@ -225,7 +232,11 @@ fn run(args: &Args) -> Result<()> {
                 bpf_run_ns,
                 bpf_run_cnt,
             };
-            queue.push(heartbeat.as_bytes());
+            // Past a queue that events keep full, so drops are still
+            // reported. When even that is refused, it is counted, and the
+            // next beat reports it. The beat is not retried sooner: that
+            // would wake the loop at once until the host reads.
+            let _counted = queue.push_control(heartbeat.as_bytes());
         }
         let reconnected = output.send(&mut queue, || hello(probes.guarded()).as_bytes().to_vec());
         // Records may have been lost, task and cgroup records among them.
