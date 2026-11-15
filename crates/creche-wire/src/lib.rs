@@ -255,7 +255,7 @@ pub struct CgroupPrefix {
 
 /// Writes a cgroup record into `out` and returns its length, or `None` when a
 /// field is out of bounds or `out` is too short. `labels` are key and value
-/// pairs, checked as a decoder would.
+/// pairs, checked as a decoder would, so a key may appear only once.
 #[must_use]
 pub fn encode_cgroup(
     pid: u32,
@@ -266,16 +266,21 @@ pub fn encode_cgroup(
     labels: &[(&[u8], &[u8])],
     out: &mut [u8],
 ) -> Option<usize> {
-    let labels_len = labels.iter().try_fold(0_usize, |sum, (key, value)| {
-        (label_key_ok(key) && label_value_ok(value)).then(|| {
-            sum.checked_add(key.len())?
-                .checked_add(value.len())?
-                .checked_add(2)
-        })?
-    })?;
     if path.len() > CGROUP_PATH_LEN || path.contains(&0) || labels.len() > MAX_LABELS {
         return None;
     }
+    let labels_len = labels
+        .iter()
+        .enumerate()
+        .try_fold(0_usize, |sum, (i, (key, value))| {
+            let earlier = labels.get(..i).unwrap_or_default();
+            let unique = !earlier.iter().any(|(k, _)| k == key);
+            (unique && label_key_ok(key) && label_value_ok(value)).then(|| {
+                sum.checked_add(key.len())?
+                    .checked_add(value.len())?
+                    .checked_add(2)
+            })?
+        })?;
     let len = size_of::<CgroupPrefix>()
         .checked_add(path.len())?
         .checked_add(labels_len)?;
@@ -324,20 +329,24 @@ pub fn label_value_ok(value: &[u8]) -> bool {
 pub struct Labels<'a>(&'a [u8]);
 
 impl<'a> Labels<'a> {
-    /// `bytes` as labels, `None` unless every key and value is valid and there
-    /// are at most [`MAX_LABELS`].
+    /// `bytes` as labels, `None` unless every key and value is valid, no key
+    /// appears twice and there are at most [`MAX_LABELS`]. A repeated key would
+    /// give one output line two attributes of the same name.
     fn parse(bytes: &'a [u8]) -> Option<Self> {
         let Some(body) = bytes.strip_suffix(b"\0") else {
             return bytes.is_empty().then_some(Self(bytes));
         };
         let mut fields = body.split(|&b| b == 0);
+        let mut keys: [&[u8]; MAX_LABELS] = [&[]; MAX_LABELS];
         let mut count = 0_usize;
         while let Some(key) = fields.next() {
             let value = fields.next()?;
-            count = count.checked_add(1)?;
-            if count > MAX_LABELS || !label_key_ok(key) || !label_value_ok(value) {
+            let earlier = keys.get(..count)?;
+            if earlier.contains(&key) || !label_key_ok(key) || !label_value_ok(value) {
                 return None;
             }
+            *keys.get_mut(count)? = key;
+            count = count.checked_add(1)?;
         }
         Some(Self(bytes))
     }
