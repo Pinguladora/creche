@@ -109,7 +109,11 @@ where
         let (otx, orx) = mpsc::channel(OTLP_BACKLOG);
         let room = Arc::new(Semaphore::new(OTLP_BYTES));
         tokio::spawn(otlp::export(endpoint, orx, Arc::clone(&room)));
-        Exporter { tx: otx, room }
+        Exporter {
+            tx: otx,
+            room,
+            piece: SANDBOX_OTLP_BYTES,
+        }
     });
     let writer = tokio::spawn(write_output(rx, Arc::clone(&tx.room), out, exporter));
     let svid = options.spiffe.clone().map(|socket| {
@@ -207,9 +211,45 @@ struct Exporter {
     /// A permit per byte that may still be queued, given back by the exporter
     /// (see [`otlp::export`]).
     room: Arc<Semaphore>,
+    /// Most bytes of one queued batch: a sandbox's share, so that a larger
+    /// batch is split rather than never fitting.
+    piece: usize,
 }
 
 impl Exporter {
+    /// Queues `batch`, split at line boundaries into pieces of at most
+    /// [`Self::piece`] bytes when it is larger. Pieces that do not fit are
+    /// counted in `dropped`.
+    fn send_pieces(&self, batch: Batch, dropped: &mut Dropped) {
+        if batch.lines.len() <= self.piece {
+            if let Err(batch) = self.try_send(batch) {
+                dropped.count(&batch.lines);
+            }
+            return;
+        }
+        let mut lines = Vec::new();
+        for line in batch.lines.split_inclusive(|&b| b == b'\n') {
+            if !lines.is_empty() && lines.len().saturating_add(line.len()) > self.piece {
+                self.send_piece(&batch, std::mem::take(&mut lines), dropped);
+            }
+            lines.extend_from_slice(line);
+        }
+        if !lines.is_empty() {
+            self.send_piece(&batch, lines, dropped);
+        }
+    }
+
+    /// Queues `lines` as a piece of `batch`.
+    fn send_piece(&self, batch: &Batch, lines: Vec<u8>, dropped: &mut Dropped) {
+        let piece = Batch {
+            lines,
+            ..batch.clone()
+        };
+        if let Err(piece) = self.try_send(piece) {
+            dropped.count(&piece.lines);
+        }
+    }
+
     /// Queues `batch` if it fits, in the queue and in its sandbox's share. When
     /// it does not, `batch` is handed back.
     fn try_send(&self, batch: Batch) -> Result<(), Batch> {
@@ -573,10 +613,8 @@ async fn write_output(
         if rx.is_empty() {
             out.flush().await?;
         }
-        if let Some(exporter) = &exporter
-            && let Err(batch) = exporter.try_send(batch)
-        {
-            dropped.count(&batch.lines);
+        if let Some(exporter) = &exporter {
+            exporter.send_pieces(batch, &mut dropped);
         }
     }
     out.flush().await
@@ -1077,6 +1115,7 @@ mod tests {
             let exporter = Exporter {
                 tx: otx,
                 room: Arc::new(Semaphore::new(OTLP_BYTES)),
+                piece: usize::MAX,
             };
             let (out, mut reader) = tokio::io::duplex(64 * 1024);
             for text in ["a\n", "b\nc\n", "d\n"] {
@@ -1156,6 +1195,32 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_larger_than_a_share_is_exported_in_pieces() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let exporter = Exporter {
+            tx,
+            room: Arc::new(Semaphore::new(100)),
+            piece: 4,
+        };
+        let share = Arc::new(Share::new(0, 4));
+        let mut dropped = Dropped::default();
+        let lines = |text: &str| Batch {
+            share: Some(Arc::clone(&share)),
+            ..batch_of(text)
+        };
+        exporter.send_pieces(lines("a\nb\nc\n"), &mut dropped);
+        assert_eq!(rx.try_recv().unwrap().lines, b"a\nb\n");
+        // The share had room for one piece only.
+        assert_eq!(dropped.lines, 1);
+        assert!(rx.try_recv().is_err());
+        // Pieces end at a line, never inside one.
+        share.export.add_permits(4);
+        exporter.send_pieces(lines("xyz\n\n"), &mut dropped);
+        assert_eq!(rx.try_recv().unwrap().lines, b"xyz\n");
+        assert_eq!(dropped.lines, 2);
+    }
+
+    #[test]
     fn each_sandbox_holds_an_eighth_of_each_queue_at_most() {
         assert_eq!(SANDBOX_OUTPUT_BYTES * 8, OUTPUT_BYTES);
         assert_eq!(SANDBOX_OTLP_BYTES * 8, OTLP_BYTES);
@@ -1167,6 +1232,7 @@ mod tests {
         let exporter = Exporter {
             tx,
             room: Arc::new(Semaphore::new(100)),
+            piece: usize::MAX,
         };
         let share = Arc::new(Share::new(0, 3));
         let mine = |lines: &str| Batch {
@@ -1188,6 +1254,7 @@ mod tests {
         let exporter = Exporter {
             tx,
             room: Arc::new(Semaphore::new(3)),
+            piece: usize::MAX,
         };
         assert_eq!(
             exporter.try_send(batch_of("a\nb\n")).unwrap_err().lines,
@@ -1201,6 +1268,7 @@ mod tests {
         let exporter = Exporter {
             tx,
             room: Arc::new(Semaphore::new(8)),
+            piece: usize::MAX,
         };
         exporter.try_send(batch_of("a\n")).unwrap();
         assert!(exporter.try_send(batch_of("b\n")).is_err());
