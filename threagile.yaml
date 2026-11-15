@@ -1203,6 +1203,16 @@ risk_tracking:
 
   # The guest and the sink
 
+  vmm-impersonation@creche-sink@kata-vmm>hybrid-vsock:
+    status: mitigated
+    justification: The sink asks the kernel which process listens on the sandbox's vsock socket, by connecting to it, and admits only that process, pinned by its pid and start time. No bound path is read back (ADR 0018).
+    date: 2026-11-15
+
+  sink-memory-exposure@creche-sink:
+    status: mitigated
+    justification: The listening sink marks itself not dumpable when it starts, so processes of its user, the VMM's included, can neither trace it nor read its memory.
+    date: 2026-11-15
+
   untrusted-deserialization@creche-sink:
     status: mitigated
     justification: The guest is untrusted by design (SECURITY.md). creche-wire decodes records with bounds checks and no copies (ADR 0004), and the fuzz targets decode and sink_stream exercise the decoder and the sink's stream handling.
