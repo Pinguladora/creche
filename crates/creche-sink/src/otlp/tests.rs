@@ -366,15 +366,11 @@ fn grpc_export_gives_up_on_a_permanent_status() {
 #[test]
 fn an_unreachable_collector_is_retried_then_dropped() {
     runtime().block_on(async {
-        // A collector that closes every connection without an answer. Its
-        // port stays bound, so no other test's collector can take it.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                drop(stream);
-            }
-        });
+        // A port bound but not listening: connections to it are refused, and
+        // no other test's collector can take it while it stays bound.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let url = format!("http://{}", reserved.local_addr().unwrap());
         let (tx, rx) = mpsc::channel(4);
         tx.send(batch(&pod_origin(), &["creche.stream.start"], 5))
             .await
