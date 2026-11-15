@@ -108,7 +108,7 @@ impl Vmm {
         let start = start_time(Path::new("/proc"), pid)?;
         let same = match &handle {
             Some(pidfd) => !exited(pidfd)?,
-            None => UnixStream::connect(vsock).await?.peer_cred()?.pid() == Some(pid),
+            None => still_listening(vsock, pid).await?,
         };
         if !same {
             return Err(io::Error::other("the listener changed while it was read"));
@@ -166,6 +166,11 @@ pub fn check(pid: Option<i32>, uid: u32, vmm: &Vmm) -> Result<(), Refusal> {
     } else {
         Err(Refusal::NotVmm { pid })
     }
+}
+
+/// Whether `pid` is still the one listening on `vsock`, asked again.
+async fn still_listening(vsock: &Path, pid: i32) -> io::Result<bool> {
+    Ok(UnixStream::connect(vsock).await?.peer_cred()?.pid() == Some(pid))
 }
 
 /// Whether the process behind `pidfd` has exited: a pidfd turns readable then.
@@ -254,6 +259,18 @@ mod tests {
                 Vmm::probe(&decoy).await.unwrap(),
                 Vmm::probe(&vsock).await.unwrap()
             );
+        });
+    }
+
+    #[test]
+    fn without_a_handle_the_listener_is_asked_again() {
+        runtime().block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let vsock = tmp.path().join("clh.sock");
+            let _listener = UnixListener::bind(&vsock).unwrap();
+            let pid = i32::try_from(std::process::id()).unwrap();
+            assert!(still_listening(&vsock, pid).await.unwrap());
+            assert!(!still_listening(&vsock, pid + 1).await.unwrap());
         });
     }
 
