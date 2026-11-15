@@ -78,7 +78,7 @@ fn render(
     let cgroup = task.and_then(|t| state.cgroups.get(t.cgroup_id));
     let guarded = match (&record.body, &state.guard) {
         (Body::Hello { flags, .. }, Some((guard, stream))) => {
-            Some(guard.hello(*stream, flags.contains(HelloFlags::GUARDED)))
+            Some(guard.hello(*stream, flags.contains(HelloFlags::GUARDED), observed_ns))
         }
         _ => None,
     };
@@ -230,28 +230,37 @@ impl StreamDecoder {
         };
         if format == Format::Json {
             self.audit(origin, observed_ns, start, out);
-            let breached = !self.json.unguarded
-                && self
-                    .json
-                    .guard
-                    .as_ref()
-                    .is_some_and(|(guard, stream)| guard.sent(*stream));
-            if breached {
-                // Said once per stream. Its hello line may have said guarded.
-                self.json.unguarded = true;
-                self.event(
-                    origin,
-                    "creche.stream.unguarded",
-                    observed_ns,
-                    &[(
-                        "creche.stream.unguarded_reason",
-                        Value::Str("concurrent_streams"),
-                    )],
-                    out,
-                );
+            if let Some((guard, stream)) = &self.json.guard {
+                guard.sent(*stream, observed_ns);
             }
+            self.note_guard(origin, observed_ns, out);
         }
         result
+    }
+
+    /// Says once, when two streams of the stream's sandbox were seen sending at
+    /// once, that the stream no longer counts as guarded: its hello line may
+    /// have said it was. Runs with every input, and should run before the
+    /// stream's end line, for a stream that stayed quiet since.
+    pub fn note_guard(&mut self, origin: &Origin, observed_ns: u64, out: &mut Vec<u8>) {
+        let breached = self
+            .json
+            .guard
+            .as_ref()
+            .is_some_and(|(guard, _)| guard.breached());
+        if breached && !self.json.unguarded {
+            self.json.unguarded = true;
+            self.event(
+                origin,
+                "creche.stream.unguarded",
+                observed_ns,
+                &[(
+                    "creche.stream.unguarded_reason",
+                    Value::Str("concurrent_streams"),
+                )],
+                out,
+            );
+        }
     }
 
     /// Bytes of an incomplete record waiting for more input.
@@ -1013,10 +1022,18 @@ mod guard_tests {
             .with_guard(Arc::clone(guard))
     }
 
-    /// The JSON lines `decoder` writes for `data`.
+    /// Late enough after a newer hello to count as a second sender.
+    const LATE: u64 = crate::guard::STALE_NS + 2;
+
+    /// The JSON lines `decoder` writes for `data`, early on.
     fn feed(decoder: &mut StreamDecoder, data: &[u8]) -> Vec<serde_json::Value> {
+        feed_at(decoder, data, 1)
+    }
+
+    /// The JSON lines `decoder` writes for `data` at host time `ns`.
+    fn feed_at(decoder: &mut StreamDecoder, data: &[u8], ns: u64) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
-        decoder.feed_at(data, &"sb".into(), 1, &mut out).unwrap();
+        decoder.feed_at(data, &"sb".into(), ns, &mut out).unwrap();
         out.split(|&b| b == b'\n')
             .filter(|l| !l.is_empty())
             .map(|l| serde_json::from_slice(l).unwrap())
@@ -1058,8 +1075,8 @@ mod guard_tests {
             true
         );
         assert_eq!(named(&said, "creche.stream.unguarded").len(), 0);
-        // The older stream still sends after the newer one said hello.
-        let lines = feed(&mut observer, &heartbeat());
+        // The older stream still sends well after the newer one said hello.
+        let lines = feed_at(&mut observer, &heartbeat(), LATE);
         let unguarded = named(&lines, "creche.stream.unguarded");
         assert_eq!(unguarded.len(), 1);
         assert_eq!(
@@ -1097,12 +1114,45 @@ mod guard_tests {
             .unwrap();
         feed(&mut intruder, &hello(true));
         observer
-            .feed_at(&heartbeat(), &origin, 2, &mut out)
+            .feed_at(&heartbeat(), &origin, LATE, &mut out)
             .unwrap();
-        observer.event(&origin, "creche.stream.end", 3, &[], &mut out);
-        observer.finish(&origin, 3, &mut out);
+        observer.event(&origin, "creche.stream.end", LATE, &[], &mut out);
+        observer.finish(&origin, LATE, &mut out);
         assert!(String::from_utf8_lossy(&out).contains("creche.stream.unguarded"));
         assert!(crate::audit::verify(&out, None).complete());
+    }
+
+    #[test]
+    fn what_a_restarted_observer_left_behind_is_not_a_second_sender() {
+        let guard = Arc::default();
+        let mut old = stream(&guard);
+        feed(&mut old, &hello(true));
+        let mut new = stream(&guard);
+        feed(&mut new, &hello(true));
+        // The old connection's last records are read after the new hello.
+        let lines = feed_at(&mut old, &heartbeat(), 2);
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 0);
+        let lines = feed_at(&mut new, &[hello(true), heartbeat()].concat(), LATE);
+        assert_eq!(
+            named(&lines, "creche.observer.hello")[0]["creche.observer.guarded"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_quiet_stream_hears_of_the_breach_when_it_ends() {
+        let guard = Arc::default();
+        let (mut observer, mut intruder) = (stream(&guard), stream(&guard));
+        feed(&mut observer, &hello(true));
+        feed(&mut intruder, &hello(true));
+        feed_at(&mut observer, &heartbeat(), LATE);
+        // The intruder sends nothing more, then its stream ends.
+        let mut out = Vec::new();
+        intruder.note_guard(&"sb".into(), LATE, &mut out);
+        assert!(String::from_utf8_lossy(&out).contains("creche.stream.unguarded"));
+        out.clear();
+        intruder.note_guard(&"sb".into(), LATE, &mut out);
+        assert_eq!(out.len(), 0);
     }
 
     #[test]

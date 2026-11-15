@@ -619,6 +619,7 @@ async fn receive(
     };
     let mut lines = Vec::new();
     let now = now_ns();
+    decoder.note_guard(&origin, now, &mut lines);
     decoder.event(
         &origin,
         "creche.stream.end",

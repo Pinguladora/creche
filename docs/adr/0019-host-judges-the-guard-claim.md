@@ -25,10 +25,13 @@ sandbox, and writes its verdict as `creche.observer.guarded`.
   A later hello counts as guarded only if the first one claimed so too.
 - A guarded port lets only the observer connect, and the observer opens a new
   connection only once the last one broke. A stream that still sends records
-  after a newer stream of the same sandbox said hello shows two senders at once.
-  Each stream of the sandbox then gets a `creche.stream.unguarded` line, with
-  `creche.stream.unguarded_reason` `concurrent_streams`, and no later hello of
-  the sandbox counts as guarded.
+  more than 2 seconds after a newer stream of the same sandbox said hello shows
+  two senders at once. Records sooner than that may be what an observer wrote
+  just before it exited. Each stream of the sandbox then gets a
+  `creche.stream.unguarded` line, with `creche.stream.unguarded_reason`
+  `concurrent_streams`, when it next sends or ends, and no later hello of the
+  sandbox counts as guarded. The 2 seconds run from the first newer hello, so
+  reconnecting again and again does not put the verdict off.
 
 A hello whose claim the sink does not take also carries
 `creche.observer.guard_claimed: true`, and its raw flags stay in
@@ -40,8 +43,9 @@ A hello whose claim the sink does not take also carries
   takes away the only signal operators have without giving them a better one.
 - Refusing connections after the first: a restarted observer could no longer
   connect (0015).
-- Taking any two open streams as evidence: a restarted observer can leave its
-  broken connection open for a moment, so that would mark honest restarts.
+- Taking any two open streams, or any records after a newer hello, as evidence:
+  a restarted observer can leave its broken connection open for a moment, with
+  records still to be read, so that would mark honest restarts.
 
 ## Consequences
 
