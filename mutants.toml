@@ -22,6 +22,6 @@ exclude_re = [
   # Only built outside tests, which cannot create root-owned bundles.
   'creche-sink/src/k8s\.rs:\d+:\d+: replace trusted_owners -> Vec<u32>',
   # MAX_RESPONSE only caps the memory a response takes: the status line comes
-  # first and is read whatever the cap.
-  'creche-sink/src/otlp\.rs:4\d:\d+: replace \* with \+',
+  # first and is read whatever the cap. Its line, to update when it moves.
+  'creche-sink/src/otlp\.rs:41:32: replace \* with \+',
 ]
