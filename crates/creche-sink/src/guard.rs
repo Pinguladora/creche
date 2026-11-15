@@ -14,8 +14,12 @@
 //!   two senders at once, so the port is not guarded. From then on no stream of
 //!   the sandbox counts as guarded. What an observer wrote just before it
 //!   exited may still be read after its successor's hello, so sends within
-//!   [`STALE_NS`] of the first newer hello do not count. Each open stream keeps
-//!   when that was, so neither more hellos nor more connections put it off.
+//!   [`STALE_NS`] of the first newer hello do not count, nor reads the sink
+//!   itself held back, waiting for room in its output: those may be late
+//!   through no doing of the guest. More than [`STALE_BYTES`] after that hello
+//!   counts whenever it is read, being more than any buffer holds. Each open
+//!   stream keeps when that hello was, so neither more hellos nor more
+//!   connections put it off.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,6 +28,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 /// How long after a newer stream's hello an older stream may still deliver
 /// what it was sent before, in nanoseconds.
 pub const STALE_NS: u64 = 2_000_000_000;
+/// How many bytes an older stream may still deliver after a newer stream's
+/// hello: more than the socket buffers between the guest and the sink hold.
+pub const STALE_BYTES: u64 = 4 << 20; // 4 MiB
 
 /// The guard evidence of one sandbox, shared by its streams.
 #[derive(Debug, Default)]
@@ -32,9 +39,9 @@ pub struct Guard {
     first: OnceLock<bool>,
     /// The next stream's number.
     next: AtomicU64,
-    /// The open streams by number, each with when a newer stream first said
-    /// hello, on the host clock. Only open streams, so it stays small.
-    open: Mutex<HashMap<u64, Option<u64>>>,
+    /// The open streams by number, each with what it did since a newer stream
+    /// first said hello. Only open streams, so it stays small.
+    open: Mutex<HashMap<u64, Seen>>,
     /// Whether two streams were seen sending at once.
     breached: AtomicBool,
 }
@@ -43,14 +50,14 @@ impl Guard {
     /// A new stream of the sandbox. It counts as open until the handle drops.
     pub fn open(guard: &Arc<Self>) -> Handle {
         let stream = guard.next.fetch_add(1, Ordering::SeqCst);
-        guard.streams().insert(stream, None);
+        guard.streams().insert(stream, Seen::default());
         Handle {
             guard: Arc::clone(guard),
             stream,
         }
     }
 
-    fn streams(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Option<u64>>> {
+    fn streams(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Seen>> {
         self.open.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -59,6 +66,15 @@ impl Guard {
     pub fn breached(&self) -> bool {
         self.breached.load(Ordering::SeqCst)
     }
+}
+
+/// What an open stream did since a newer stream first said hello.
+#[derive(Debug, Default)]
+struct Seen {
+    /// When that hello came, on the host clock. `None` before one did.
+    since_ns: Option<u64>,
+    /// Bytes the stream delivered since.
+    bytes: u64,
 }
 
 /// One stream's place in its sandbox's guard evidence.
@@ -81,20 +97,31 @@ impl Handle {
             .iter_mut()
             .filter(|(older, _)| **older < self.stream)
         {
-            seen.get_or_insert(now_ns);
+            seen.since_ns.get_or_insert(now_ns);
         }
         claimed && first && !self.guard.breached()
     }
 
-    /// The stream sent records at `now_ns`. Returns whether two streams of the
-    /// sandbox have now been seen sending at once: a newer stream said hello
-    /// more than [`STALE_NS`] before.
+    /// The stream delivered `bytes` at `now_ns`, in a read the sink did not
+    /// hold back when `prompt`. Returns whether two streams of the sandbox have
+    /// now been seen sending at once: since a newer stream said hello, more
+    /// than [`STALE_NS`] went by before a prompt read, or more than
+    /// [`STALE_BYTES`] came.
     #[must_use]
-    pub fn sent(&self, now_ns: u64) -> bool {
-        let seen = self.guard.streams().get(&self.stream).copied().flatten();
-        if seen.is_some_and(|at| now_ns.saturating_sub(at) > STALE_NS) {
-            self.guard.breached.store(true, Ordering::SeqCst);
+    pub fn sent(&self, now_ns: u64, bytes: usize, prompt: bool) -> bool {
+        let mut streams = self.guard.streams();
+        if let Some(seen) = streams.get_mut(&self.stream)
+            && let Some(since) = seen.since_ns
+        {
+            seen.bytes = seen
+                .bytes
+                .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+            let late = prompt && now_ns.saturating_sub(since) > STALE_NS;
+            if late || seen.bytes > STALE_BYTES {
+                self.guard.breached.store(true, Ordering::SeqCst);
+            }
         }
+        drop(streams);
         self.guard.breached()
     }
 
@@ -137,13 +164,13 @@ mod tests {
         let guard = Arc::default();
         let old = Guard::open(&guard);
         assert!(old.hello(true, 0));
-        assert!(!old.sent(1));
+        assert!(!old.sent(1, 1, true));
         let new = Guard::open(&guard);
         assert!(new.hello(true, 10));
         // What the old observer wrote before it exited is still read.
-        assert!(!old.sent(10 + STALE_NS));
+        assert!(!old.sent(10 + STALE_NS, 1, true));
         drop(old);
-        assert!(!new.sent(10 + LATE));
+        assert!(!new.sent(10 + LATE, 1, true));
         assert!(!guard.breached());
     }
 
@@ -154,10 +181,10 @@ mod tests {
         assert!(observer.hello(true, 0));
         let intruder = Guard::open(&guard);
         assert!(intruder.hello(true, 0));
-        assert!(!intruder.sent(LATE));
+        assert!(!intruder.sent(LATE, 1, true));
         // The observer still sends: two senders.
-        assert!(observer.sent(LATE));
-        assert!(intruder.sent(LATE));
+        assert!(observer.sent(LATE, 1, true));
+        assert!(intruder.sent(LATE, 1, true));
         assert!(!Guard::open(&guard).hello(true, LATE));
     }
 
@@ -172,7 +199,22 @@ mod tests {
             let _taken = intruder.hello(true, i * STALE_NS / 20);
             let _taken = Guard::open(&guard).hello(true, i * STALE_NS / 20);
         }
-        assert!(observer.sent(STALE_NS / 20 + LATE));
+        assert!(observer.sent(STALE_NS / 20 + LATE, 1, true));
+    }
+
+    #[test]
+    fn late_reads_the_sink_held_back_do_not_count_but_many_bytes_do() {
+        let guard = Arc::default();
+        let old = Guard::open(&guard);
+        assert!(old.hello(true, 0));
+        let new = Guard::open(&guard);
+        assert!(new.hello(true, 0));
+        // Read late because the sink's output was full, not the guest's doing.
+        assert!(!old.sent(LATE, 1000, false));
+        // But more than any buffer holds is a second sender, however read.
+        let all = usize::try_from(STALE_BYTES).unwrap();
+        assert!(!old.sent(LATE, all - 1000, false));
+        assert!(old.sent(LATE, 1, false));
     }
 
     #[test]
@@ -181,7 +223,7 @@ mod tests {
         let observer = Guard::open(&guard);
         assert!(observer.hello(true, 0));
         let _quiet = Guard::open(&guard);
-        assert!(!observer.sent(LATE));
+        assert!(!observer.sent(LATE, 1, true));
     }
 
     #[test]

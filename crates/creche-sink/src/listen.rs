@@ -56,6 +56,10 @@ const READ_CHUNK: usize = 65_536; // 64 KiB
 /// Open connections per sandbox. An observer keeps one, a restarted observer
 /// briefly two. Each connection costs a decoder and a task cache.
 const MAX_CONNECTIONS: usize = 4;
+/// Longest the sink may hold a stream's lines back, waiting for room in its
+/// output, before it takes the stream's next read as held back (see
+/// [`StreamDecoder::held_back`]).
+const HOLD: Duration = Duration::from_millis(100);
 /// Longest sandbox id. containerd ids are at most 76 characters.
 const MAX_ID_LEN: usize = 76;
 
@@ -578,6 +582,7 @@ async fn receive(
         return;
     }
     let mut chunk = vec![0; READ_CHUNK];
+    let mut held = false;
     let reason = loop {
         let n = match stream.read(&mut chunk).await {
             Ok(0) => break "closed",
@@ -585,6 +590,7 @@ async fn receive(
             Ok(n) => n,
         };
         let now = now_ns();
+        decoder.held_back(held);
         // Decoding may block: the first claim of each container reads its
         // bundle. One thread runs every stream, so it decodes elsewhere.
         let done = tokio::task::spawn_blocking({
@@ -606,9 +612,11 @@ async fn receive(
         };
         (decoder, chunk) = (back, buf);
         // Lines decoded before a corrupt record are still sent.
+        let sending = tokio::time::Instant::now();
         if !lines.is_empty() && tx.send(batch(now, lines)).await.is_err() {
             return;
         }
+        held = held_back(sending.elapsed());
         if let Err(e) = fed {
             eprintln!(
                 "creche-sink: dropping corrupt stream from {}: {e}",
@@ -691,6 +699,12 @@ impl Dropped {
             self.reported = tokio::time::Instant::now();
         }
     }
+}
+
+/// Whether lines that waited `waited` for room in the output held their
+/// stream back.
+fn held_back(waited: Duration) -> bool {
+    waited > HOLD
 }
 
 /// The first 12 characters of a sandbox id, for log messages.
@@ -1257,6 +1271,13 @@ mod tests {
         exporter.send_pieces(lines("xyz\n\n"), &mut dropped);
         assert_eq!(rx.try_recv().unwrap().lines, b"xyz\n");
         assert_eq!(dropped.lines, 2);
+    }
+
+    #[test]
+    fn a_stream_is_held_back_once_its_lines_waited_longer_than_hold() {
+        assert!(!held_back(Duration::ZERO));
+        assert!(!held_back(HOLD));
+        assert!(held_back(HOLD + Duration::from_millis(1)));
     }
 
     #[test]

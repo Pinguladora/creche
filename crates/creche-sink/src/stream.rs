@@ -55,6 +55,8 @@ struct JsonState {
     guard: Option<guard::Handle>,
     /// Whether the stream was told it no longer counts as guarded.
     unguarded: bool,
+    /// Whether the sink held the stream's next read back itself.
+    held: bool,
 }
 
 /// Returns `*seq` and advances it.
@@ -230,11 +232,19 @@ impl StreamDecoder {
         if format == Format::Json {
             self.audit(origin, observed_ns, start, out);
             if let Some(guard) = &self.json.guard {
-                let _breached = guard.sent(observed_ns);
+                let _breached = guard.sent(observed_ns, data.len(), !self.json.held);
             }
             self.note_guard(origin, observed_ns, out);
         }
         result
+    }
+
+    /// Whether the sink held the stream's next read back itself, waiting for
+    /// room in its output. Such a read may be late through no doing of the
+    /// guest, so it is not taken as a sign of a second sender (see
+    /// [`crate::guard`]).
+    pub const fn held_back(&mut self, held: bool) {
+        self.json.held = held;
     }
 
     /// Says once, when two streams of the stream's sandbox were seen sending at
@@ -1136,6 +1146,22 @@ mod guard_tests {
             named(&lines, "creche.observer.hello")[0]["creche.observer.guarded"],
             true
         );
+    }
+
+    #[test]
+    fn a_read_the_sink_held_back_is_not_a_second_sender() {
+        let guard = Arc::default();
+        let (mut old, mut new) = (stream(&guard), stream(&guard));
+        feed(&mut old, &hello(true));
+        feed(&mut new, &hello(true));
+        // The sink's output was full, so the old stream's last records are
+        // read late.
+        old.held_back(true);
+        let lines = feed_at(&mut old, &heartbeat(), LATE);
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 0);
+        old.held_back(false);
+        let lines = feed_at(&mut old, &heartbeat(), LATE);
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 1);
     }
 
     #[test]
