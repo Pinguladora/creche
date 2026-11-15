@@ -182,6 +182,11 @@ fn main() -> ExitCode {
 }
 
 fn listen(dir: PathBuf, options: Options) -> Result<()> {
+    // The sink holds the signing keys of the open streams. Not dumpable, it
+    // cannot be traced, nor its memory read, by other processes of its user,
+    // such as the VMM's when it shares that user.
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .context("marking the sink not dumpable")?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
