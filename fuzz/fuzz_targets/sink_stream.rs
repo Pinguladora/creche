@@ -1,8 +1,10 @@
 //! The sink's stream decoder on arbitrary guest bytes, in both output formats.
 //! Fed whole or in chunks it writes the same output, every JSON line is valid
-//! JSON of bounded size, and raw frames carry the input unchanged.
+//! JSON of bounded size with no member named twice, and raw frames carry the
+//! input unchanged.
 #![no_main]
 
+use creche_fuzz::unique_names;
 use creche_sink::json::Origin;
 use creche_sink::stream::{Format, StreamDecoder};
 use libfuzzer_sys::fuzz_target;
@@ -52,6 +54,7 @@ fuzz_target!(|input: &[u8]| {
     for line in whole.split_inclusive(|&b| b == b'\n') {
         assert!(line.len() <= MAX_LINE, "line of {} bytes", line.len());
         let value: serde_json::Value = serde_json::from_slice(line).unwrap();
+        assert!(unique_names(line), "{}", String::from_utf8_lossy(line));
         assert_eq!(value["creche.sandbox.id"], "sb");
         assert!(value["event.name"].is_string());
     }

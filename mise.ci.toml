@@ -20,10 +20,15 @@ description = "Licenses, advisories, bans and sources (cargo-deny)"
 run = "cargo deny --locked check"
 
 [tasks."ci:fuzz"]
-description = "Check that the fuzz workspace builds against the current crates, with its lockfile current"
-# The fuzz crate is a workspace of its own, so nothing else builds it. --locked
-# also fails when a crate gains a dependency and fuzz/Cargo.lock was not updated.
-run = "cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked"
+description = "Check that the fuzz workspace is formatted, builds against the current crates with its lockfile current, and passes its own tests"
+# The fuzz crate is a workspace of its own, so neither ci:fmt nor anything else
+# checks it. --locked also fails when a crate gains a dependency and
+# fuzz/Cargo.lock was not updated.
+run = [
+  "cargo fmt --all --check --manifest-path fuzz/Cargo.toml",
+  "cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked",
+  "cargo test --manifest-path fuzz/Cargo.toml --lib --locked",
+]
 
 [tasks."ci:check"]
 description = "Full CI gate: format, clippy, cargo-deny, the fuzz workspace, then the tests (which build the BPF object)"

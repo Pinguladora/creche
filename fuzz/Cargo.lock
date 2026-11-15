@@ -117,6 +117,7 @@ dependencies = [
  "creche-sink",
  "creche-wire",
  "libfuzzer-sys",
+ "serde",
  "serde_json",
  "zerocopy",
 ]
