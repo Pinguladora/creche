@@ -45,7 +45,7 @@ usage: creche-observer [-p PORT] [-s] [-S] [-d]
   -p, --port PORT  vsock port on the host (default 7000)
   -s, --stdout     write the record stream to stdout instead of vsock
   -S, --stats      enable kernel BPF run-time stats (reported in heartbeats)
-  -d, --dedup      collapse repeated opens of a file by the same process (1 s window)
+  -d, --dedup      collapse repeated opens of a path by the same process (1 s window)
   -b, --batch-ms MS  drain at most once per MS milliseconds (default 20)
 Overhead breakdown only:
   --stage STAGE    attach (programs return at once), logic (no ring buffer output) or full
