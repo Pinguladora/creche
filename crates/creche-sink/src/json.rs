@@ -228,7 +228,13 @@ pub fn render(
         if let Some(c) = cgroup {
             line.out.extend_from_slice(&c.json);
         }
-        if let Some(c) = &t.container {
+        // The container was confirmed for the cgroup as described when the
+        // process entered it. One described again since under another
+        // container's path no longer goes with it.
+        let container = t.container.as_ref().filter(|c| {
+            cgroup.is_none_or(|g| crate::k8s::claimed_id(g.container_scope()) == Some(&*c.id))
+        });
+        if let Some(c) = container {
             line.str(key!("creche.guest.container.id"), &c.id);
             line.str(key!("creche.guest.container.name"), &c.name);
         }

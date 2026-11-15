@@ -697,6 +697,49 @@ mod tests {
     }
 
     #[test]
+    fn a_cgroup_described_again_under_another_container_loses_the_first() {
+        use std::sync::Arc;
+
+        let ours = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
+        let theirs = "b".repeat(64);
+        let tmp = bundles(&[(ours, "sb"), (&theirs, "other")]);
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let data = [
+            cgroup(
+                5,
+                0,
+                &format!("/kubepods/cri-containerd-{ours}.scope/planner"),
+                &[],
+            ),
+            task_in(10, 1, &sh, 5, b"planner\0"),
+            fork(11, 10),
+            cgroup(
+                5,
+                0,
+                &format!("/kubepods/cri-containerd-{theirs}.scope/tools"),
+                &[],
+            ),
+            fork(12, 10),
+        ]
+        .concat();
+        let containers = Containers::new(Arc::from(tmp.path()), Arc::from("sb"));
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .with_containers(containers)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let l = lines(&out);
+        assert_eq!(l[0]["creche.guest.container.id"], ours);
+        assert!(
+            l[1]["creche.cgroup.path"]
+                .as_str()
+                .unwrap()
+                .contains(&theirs)
+        );
+        assert!(l[1].get("creche.guest.container.id").is_none());
+    }
+
+    #[test]
     fn a_cgroup_without_labels_has_a_path_and_no_owner() {
         let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
         let data = [
