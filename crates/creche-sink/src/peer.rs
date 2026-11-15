@@ -76,20 +76,31 @@ impl Vmm {
     /// the credentials the connection carries. The connection is closed without
     /// sending anything, which the VMM sees as a peer that went away.
     ///
+    /// It asks again after reading the listener's start time. Had the listener
+    /// exited and its pid gone to another process in between, the start time
+    /// would be that process's, but nothing would listen on `vsock` under that
+    /// pid any more.
+    ///
     /// # Errors
     ///
-    /// When nothing listens on `vsock` yet, or the listener cannot be inspected.
+    /// When nothing listens on `vsock` yet, the listener cannot be inspected,
+    /// or it changed while it was.
     pub async fn probe(vsock: &Path) -> io::Result<Self> {
         let cred = UnixStream::connect(vsock).await?.peer_cred()?;
         let pid = cred
             .pid()
             .filter(|&pid| pid > 0)
             .ok_or_else(|| io::Error::other("the listener's pid is unknown"))?;
+        let start = start_time(Path::new("/proc"), pid)?;
+        let again = UnixStream::connect(vsock).await?.peer_cred()?;
+        if again.pid() != Some(pid) {
+            return Err(io::Error::other("the listener changed while it was read"));
+        }
         Ok(Self {
             pid,
             uid: cred.uid(),
             gid: cred.gid(),
-            start: start_time(Path::new("/proc"), pid)?,
+            start,
         })
     }
 
