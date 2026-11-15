@@ -65,12 +65,20 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// Reads `http://host[:port][/path]`. The port defaults to the protocol's
-    /// and the OTLP/HTTP path to `/v1/logs`.
+    /// and the OTLP/HTTP path to `/v1/logs`. Only printable ASCII is accepted,
+    /// as both parts are copied into the request head as they are.
     ///
     /// # Errors
     ///
-    /// When `url` is not a cleartext `http` URL with a host.
+    /// When `url` is not a cleartext `http` URL with a host, or holds a space,
+    /// a control character or anything else that is not printable ASCII.
     pub fn parse(url: &str, protocol: Protocol) -> Result<Self, String> {
+        if !url.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(format!(
+                "{}: a URL holds only printable ASCII, without spaces",
+                url.escape_debug()
+            ));
+        }
         let rest = url.strip_prefix("http://").ok_or_else(|| {
             if url.starts_with("https://") {
                 "TLS is left to the collector: export to a collector on the node over http://"
