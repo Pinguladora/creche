@@ -27,9 +27,10 @@ the connection without sending anything, and pins the VMM by its pid and its
 start time from `/proc/<pid>/stat`, so a process that later reuses the pid is
 not taken for it. The connection also gives a handle on the listener process
 (a pidfd), and the start time counts only if that process is still alive after
-the read, so it cannot be that of a process that took the pid meanwhile. Where
-the kernel gives no handle, the sink connects again after the read and expects
-the same pid instead.
+the read, so it cannot be that of a process that took the pid meanwhile. A
+listener that is gone gives no handle, and the sink refuses it. A kernel before
+Linux 6.5 gives no handles at all: there the sink connects again after the read
+and expects the same pid instead.
 
 A connection to `clh.sock_P` is accepted only when its credentials name that
 same process: the same user, the same pid and the same start time. No path is
@@ -49,4 +50,6 @@ owned by the VMM's user and group as the credentials report them.
 The VMM sees one connection from the sink per sandbox, or two on kernels
 without pidfds, that end before they send anything. A sandbox whose `clh.sock` exists but has no listener yet gets no
 listener of its own until it has one. Taking over the VMM process itself, by
-ptrace as its user or as root, still passes, as before.
+ptrace as its user or as root, still passes, as before. On a kernel before 6.5
+so does a listening socket that outlived the VMM in another process while the
+VMM's pid went to a new one, which only such a takeover can arrange.

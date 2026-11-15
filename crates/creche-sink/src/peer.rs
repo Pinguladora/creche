@@ -84,9 +84,10 @@ impl Vmm {
     /// The listener's start time is read by its pid. The connection also gives
     /// a handle on the listener process itself (a pidfd, Linux 6.5 and later),
     /// and the start time counts only if that process is still alive after the
-    /// read: while it lives, nothing else can have its pid. Without a handle it
-    /// asks again after the read and expects the same pid, which holds unless
-    /// the listening socket outlived the VMM in another process.
+    /// read: while it lives, nothing else can have its pid. A listener that is
+    /// gone gives no handle and is refused. On a kernel without handles it asks
+    /// again after the read and expects the same pid, which holds unless the
+    /// listening socket outlived the VMM in another process.
     ///
     /// # Errors
     ///
@@ -101,7 +102,9 @@ impl Vmm {
             .ok_or_else(|| io::Error::other("the listener's pid is unknown"))?;
         let handle = match getsockopt(&stream, PeerPidfd) {
             Ok(pidfd) => Some(pidfd),
-            Err(Errno::ENOPROTOOPT | Errno::EINVAL) => None,
+            // Only a kernel without the option falls back. EINVAL says the
+            // listener is gone, and is refused like any other error.
+            Err(Errno::ENOPROTOOPT) => None,
             Err(e) => return Err(e.into()),
         };
         drop(stream);
