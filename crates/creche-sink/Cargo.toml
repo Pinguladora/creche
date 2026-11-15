@@ -27,6 +27,7 @@ lexopt.workspace = true
 p256.workspace = true
 prost.workspace = true
 ruzstd.workspace = true
+rustix = { workspace = true, features = ["process"] }
 miniserde.workspace = true
 nix = { workspace = true, features = ["poll", "socket"] }
 sha2.workspace = true

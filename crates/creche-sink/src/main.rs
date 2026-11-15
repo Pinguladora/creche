@@ -147,6 +147,17 @@ fn parse_args() -> Result<Option<Mode>, lexopt::Error> {
 }
 
 fn main() -> ExitCode {
+    // The sink holds the signing keys of the open streams. Not dumpable, it
+    // cannot be traced, nor its memory read, by other processes of its user,
+    // such as the VMM's when it shares that user. First thing, to leave them
+    // as short a window as possible. A process that attached before this can
+    // still keep it dumpable.
+    if let Err(e) =
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+    {
+        eprintln!("creche-sink: marking the sink not dumpable: {e}");
+        return ExitCode::FAILURE;
+    }
     let mode = match parse_args() {
         Ok(Some(mode)) => mode,
         Ok(None) => {
