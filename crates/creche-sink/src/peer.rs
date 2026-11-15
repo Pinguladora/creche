@@ -19,7 +19,12 @@
 use std::fmt;
 use std::fs;
 use std::io;
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::path::Path;
+
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::sys::socket::{getsockopt, sockopt::PeerPidfd};
 
 use tokio::net::UnixStream;
 
@@ -76,24 +81,36 @@ impl Vmm {
     /// the credentials the connection carries. The connection is closed without
     /// sending anything, which the VMM sees as a peer that went away.
     ///
-    /// It asks again after reading the listener's start time. Had the listener
-    /// exited and its pid gone to another process in between, the start time
-    /// would be that process's, but nothing would listen on `vsock` under that
-    /// pid any more.
+    /// The listener's start time is read by its pid. The connection also gives
+    /// a handle on the listener process itself (a pidfd, Linux 6.5 and later),
+    /// and the start time counts only if that process is still alive after the
+    /// read: while it lives, nothing else can have its pid. Without a handle it
+    /// asks again after the read and expects the same pid, which holds unless
+    /// the listening socket outlived the VMM in another process.
     ///
     /// # Errors
     ///
     /// When nothing listens on `vsock` yet, the listener cannot be inspected,
     /// or it changed while it was.
     pub async fn probe(vsock: &Path) -> io::Result<Self> {
-        let cred = UnixStream::connect(vsock).await?.peer_cred()?;
+        let stream = UnixStream::connect(vsock).await?;
+        let cred = stream.peer_cred()?;
         let pid = cred
             .pid()
             .filter(|&pid| pid > 0)
             .ok_or_else(|| io::Error::other("the listener's pid is unknown"))?;
+        let handle = match getsockopt(&stream, PeerPidfd) {
+            Ok(pidfd) => Some(pidfd),
+            Err(Errno::ENOPROTOOPT | Errno::EINVAL) => None,
+            Err(e) => return Err(e.into()),
+        };
+        drop(stream);
         let start = start_time(Path::new("/proc"), pid)?;
-        let again = UnixStream::connect(vsock).await?.peer_cred()?;
-        if again.pid() != Some(pid) {
+        let same = match &handle {
+            Some(pidfd) => !exited(pidfd)?,
+            None => UnixStream::connect(vsock).await?.peer_cred()?.pid() == Some(pid),
+        };
+        if !same {
             return Err(io::Error::other("the listener changed while it was read"));
         }
         Ok(Self {
@@ -149,6 +166,12 @@ pub fn check(pid: Option<i32>, uid: u32, vmm: &Vmm) -> Result<(), Refusal> {
     } else {
         Err(Refusal::NotVmm { pid })
     }
+}
+
+/// Whether the process behind `pidfd` has exited: a pidfd turns readable then.
+fn exited(pidfd: &OwnedFd) -> io::Result<bool> {
+    let mut fds = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
+    Ok(poll(&mut fds, PollTimeout::ZERO)? > 0)
 }
 
 /// When `pid` started, from field 22 of `/proc/<pid>/stat`. The fields are
@@ -232,6 +255,20 @@ mod tests {
                 Vmm::probe(&vsock).await.unwrap()
             );
         });
+    }
+
+    #[test]
+    fn a_process_handle_tells_when_its_process_exited() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+        assert!(!exited(&pidfd).unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(exited(&pidfd).unwrap());
     }
 
     #[test]
