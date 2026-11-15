@@ -1,5 +1,6 @@
 //! The wire decoder on arbitrary bytes: it never panics, never reads past its
-//! input, agrees with `peek_len`, and keeps every field within its maximum.
+//! input, agrees with `peek_len`, keeps every field within its maximum, and
+//! never yields a label key twice.
 #![no_main]
 
 use creche_wire::{ARGS_LEN, Body, CGROUP_LEN, PATH_LEN, Records, decode, peek_len};
@@ -27,6 +28,12 @@ fuzz_target!(|data: &[u8]| {
                 assert!(args.len() <= ARGS_LEN);
             }
             Body::OpenWrite { path } => assert!(path.len() <= PATH_LEN),
+            Body::Cgroup { labels, .. } => {
+                let keys: Vec<&str> = labels.iter().map(|(k, _)| k).collect();
+                for (i, key) in keys.iter().enumerate() {
+                    assert!(!keys[..i].contains(key), "{key} repeats");
+                }
+            }
             _ => {}
         }
         at += len;

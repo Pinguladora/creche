@@ -6,6 +6,8 @@
 use std::fs;
 use std::path::Path;
 
+use creche_sink::json::Origin;
+use creche_sink::stream::{Format, StreamDecoder};
 use creche_wire::{
     ARGS_LEN, CGROUP_LEN, CGROUP_PATH_LEN, Header, Kind, LABEL_KEY_LEN, LABEL_VALUE_LEN,
     MAX_LABELS, MAX_RECORD_LEN, PATH_LEN, encode_cgroup, sample,
@@ -36,6 +38,18 @@ fn context() -> Vec<u8> {
     c.extend_from_slice(&9_u64.to_ne_bytes());
     c.extend_from_slice(&[0x01; 16]);
     c
+}
+
+/// The archive a sink writes for one stream of `records`.
+fn archive(records: &[u8]) -> Vec<u8> {
+    let origin = Origin::from("sb").with_stream("s1");
+    let mut decoder = StreamDecoder::new(Format::Json).with_audit();
+    let mut out = Vec::new();
+    decoder.event(&origin, "creche.stream.start", 1, &[], &mut out);
+    let _ = decoder.feed_at(records, &origin, 2, &mut out);
+    decoder.event(&origin, "creche.stream.end", 3, &[], &mut out);
+    decoder.finish(&origin, 3, &mut out);
+    out
 }
 
 fn main() {
@@ -76,6 +90,20 @@ fn main() {
     ];
 
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    // verify_tamper reads its edit from the first 8 bytes, verify_report an
+    // archive the sink wrote.
+    for (target, prefix) in [("verify_tamper", &[1_u8, 9, 0, 2, 5, 1, 0, 0][..])] {
+        let dir = corpus.join(target);
+        fs::create_dir_all(&dir).unwrap();
+        for (i, seed) in seeds.iter().enumerate() {
+            fs::write(dir.join(format!("seed-{i}")), [prefix, seed].concat()).unwrap();
+        }
+    }
+    let dir = corpus.join("verify_report");
+    fs::create_dir_all(&dir).unwrap();
+    for (i, seed) in seeds.iter().enumerate() {
+        fs::write(dir.join(format!("seed-{i}")), archive(seed)).unwrap();
+    }
     for target in ["decode", "sink_stream"] {
         let dir = corpus.join(target);
         fs::create_dir_all(&dir).unwrap();

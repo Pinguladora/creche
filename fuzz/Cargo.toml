@@ -15,8 +15,12 @@ cargo-fuzz = true
 creche-sink = { path = "../crates/creche-sink" }
 creche-wire = { path = "../crates/creche-wire", features = ["sample"] }
 libfuzzer-sys = "0.4.10"
+serde = "1.0.229"
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 zerocopy = "0.8"
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "decode"
@@ -28,6 +32,20 @@ bench = false
 [[bin]]
 name = "sink_stream"
 path = "fuzz_targets/sink_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_report"
+path = "fuzz_targets/verify_report.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_tamper"
+path = "fuzz_targets/verify_tamper.rs"
 test = false
 doc = false
 bench = false
