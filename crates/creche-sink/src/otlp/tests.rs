@@ -366,10 +366,15 @@ fn grpc_export_gives_up_on_a_permanent_status() {
 #[test]
 fn an_unreachable_collector_is_retried_then_dropped() {
     runtime().block_on(async {
-        // A port nothing listens on: bind, note it, close.
+        // A collector that closes every connection without an answer. Its
+        // port stays bound, so no other test's collector can take it.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
         let (tx, rx) = mpsc::channel(4);
         tx.send(batch(&pod_origin(), &["creche.stream.start"], 5))
             .await
