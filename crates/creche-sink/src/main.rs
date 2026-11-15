@@ -241,40 +241,7 @@ fn verify(
         .transpose()
         .map_err(|e| anyhow::anyhow!("--spiffe-id: {e}"))?;
     let report = audit::verify(&read_input(file)?, trust.as_ref());
-    let mut out = io::stdout().lock();
-    for (stream, s) in &report.streams {
-        writeln!(
-            out,
-            "stream {stream}: {} lines, {} verified by {} checkpoints, {}",
-            s.lines,
-            s.verified,
-            s.checkpoints,
-            if s.ended { "ended" } else { "open" }
-        )?;
-        if s.duplicates > 0 {
-            writeln!(out, "  {} repeated deliveries dropped", s.duplicates)?;
-        }
-        match &s.signer {
-            Some(id) if s.trusted => match &s.node {
-                Some(node) => writeln!(
-                    out,
-                    "  signed by {id}, trusted by the bundle, on node {node}"
-                )?,
-                None => writeln!(out, "  signed by {id}, trusted by the bundle")?,
-            },
-            Some(id) => writeln!(out, "  signed by {id}, not checked against a trust bundle")?,
-            None if s.signed => writeln!(out, "  signature not accepted")?,
-            None => writeln!(out, "  not signed")?,
-        }
-        for problem in &s.problems {
-            writeln!(out, "  problem: {problem}")?;
-        }
-    }
-    writeln!(
-        out,
-        "{} lines outside any stream, {} unreadable",
-        report.outside, report.unreadable
-    )?;
+    write!(io::stdout().lock(), "{report}")?;
     Ok(report.intact())
 }
 
