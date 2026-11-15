@@ -10,9 +10,10 @@
 //!
 //! On cgroup v2 a cgroup's id is the inode number of its directory, so one
 //! walk of the hierarchy maps every id to its path. The walk runs only when a
-//! record names an id it has not seen, and at most a tenth of the time: a guest
-//! that makes cgroups faster than that has the rest described when they next
-//! appear. The walk, the paths and the ids described are bounded.
+//! record names an id it has not seen, and at most a tenth of the time. A cgroup
+//! first named in between is described as soon as the next walk may run, even
+//! if no record names it again, and lines from then on carry its path and
+//! labels. The walk, the paths and the ids described or waiting are bounded.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -49,6 +50,9 @@ pub struct Cgroups {
     described: HashSet<u64>,
     /// When the next walk may run, on the clock records are stamped with.
     next_walk_ns: u64,
+    /// Ids to describe once a walk may run again: named too soon after the
+    /// last one, or described in a record that did not reach the queue.
+    deferred: HashSet<u64>,
     /// Room for the longest record, which the longest cgroup record fits.
     record: Box<[u8; MAX_RECORD_LEN]>,
 }
@@ -62,6 +66,7 @@ impl Cgroups {
             paths: HashMap::new(),
             described: HashSet::new(),
             next_walk_ns: 0,
+            deferred: HashSet::new(),
             record: Box::new([0; MAX_RECORD_LEN]),
         }
     }
@@ -76,6 +81,7 @@ impl Cgroups {
         }
         if !self.paths.contains_key(&id) {
             if ts_ns < self.next_walk_ns {
+                self.defer(id);
                 return None;
             }
             let started = Instant::now();
@@ -109,9 +115,34 @@ impl Cgroups {
     }
 
     /// Forgets that cgroup `id` was described, when its description did not
-    /// reach the queue.
+    /// reach the queue, and describes it again soon (see [`Self::next_deferred`]).
     pub fn retract(&mut self, id: u64) {
         self.described.remove(&id);
+        self.defer(id);
+    }
+
+    fn defer(&mut self, id: u64) {
+        if self.deferred.len() < MAX_CGROUPS {
+            self.deferred.insert(id);
+        }
+    }
+
+    /// Whether cgroups wait to be described.
+    #[must_use]
+    pub fn deferring(&self) -> bool {
+        !self.deferred.is_empty()
+    }
+
+    /// One deferred cgroup, at `ts_ns`, and its record if it still needs one.
+    /// `None` once none waits, or while the ones waiting need a walk that may
+    /// not run yet.
+    pub fn next_deferred(&mut self, pid: u32, ts_ns: u64) -> Option<(u64, Option<&[u8]>)> {
+        let &id = self.deferred.iter().next()?;
+        if !self.paths.contains_key(&id) && ts_ns < self.next_walk_ns {
+            return None;
+        }
+        self.deferred.remove(&id);
+        Some((id, self.describe(id, pid, ts_ns)))
     }
 
     /// Forgets what the host was told, for a new connection or after records
@@ -333,6 +364,30 @@ mod tests {
         assert!(cgroups.describe(ino(&late), 1, later).is_some());
         // A gap of at least MIN_WALK_GAP_NS follows each walk.
         assert!(cgroups.next_walk_ns >= later + MIN_WALK_GAP_NS);
+    }
+
+    #[test]
+    fn a_cgroup_skipped_in_the_gap_is_described_once_a_walk_may_run() {
+        let (tmp, tool) = tree();
+        let mut cgroups = Cgroups::new(tmp.path());
+        assert!(cgroups.describe(ino(&tool), 1, 1).is_some());
+        let late = tool.join("late");
+        fs::create_dir(&late).unwrap();
+        assert!(cgroups.describe(ino(&late), 1, 2).is_none());
+        assert!(cgroups.deferring());
+        // Not before the gap is over.
+        assert!(cgroups.next_deferred(1, 3).is_none());
+        let later = cgroups.next_walk_ns;
+        let (id, record) = cgroups.next_deferred(1, later).unwrap();
+        assert_eq!(id, ino(&late));
+        assert_eq!(decoded(record.unwrap()).0, "/pod/ctr/agent/tool/late");
+        assert!(!cgroups.deferring());
+        assert!(cgroups.next_deferred(1, later).is_none());
+        // A description that did not reach the queue waits again. Known now,
+        // it needs no walk.
+        cgroups.retract(id);
+        let (_, record) = cgroups.next_deferred(1, later).unwrap();
+        assert!(record.is_some());
     }
 
     #[test]

@@ -179,7 +179,7 @@ fn run(args: &Args) -> Result<()> {
         // drained in between, that record would wait for the heartbeat, so
         // after a drain that found records, sleep at most one more window.
         let mut wait = next_beat.saturating_duration_since(Instant::now());
-        if drained {
+        if drained || cgroups.deferring() {
             wait = wait.min(args.batch_window);
         }
         let timeout = EpollTimeout::try_from(wait).unwrap_or(EpollTimeout::NONE);
@@ -198,6 +198,9 @@ fn run(args: &Args) -> Result<()> {
             if !args.discard {
                 forward(&mut queue, &mut cgroups, &record, pid);
             }
+        }
+        if !args.discard {
+            forward_deferred(&mut queue, &mut cgroups, pid);
         }
         if Instant::now() >= next_beat {
             next_beat += BEAT;
@@ -252,6 +255,21 @@ fn forward(queue: &mut RecordQueue, cgroups: &mut Cgroups, record: &[u8], pid: u
         }
         None => {
             let _counted = queue.push(record);
+        }
+    }
+}
+
+/// Queues the descriptions of cgroups whose walk had to wait, once it may run.
+/// Lines from then on carry their paths and labels, though no record named them
+/// again. One that does not fit waits for the next batch.
+fn forward_deferred(queue: &mut RecordQueue, cgroups: &mut Cgroups, pid: u32) {
+    let now = metrics::boottime_ns();
+    while let Some((id, description)) = cgroups.next_deferred(pid, now) {
+        if let Some(description) = description
+            && !queue.push(description)
+        {
+            cgroups.retract(id);
+            return;
         }
     }
 }
