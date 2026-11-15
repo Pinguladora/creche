@@ -83,9 +83,26 @@ struct inode {
 	struct super_block *i_sb;
 } CO_RE;
 
+/* A name's hash and length, read together. The kernel nests them in anonymous
+ * members, which the stub mirrors so the relocations match. */
+struct qstr {
+	union {
+		struct {
+			__u32 hash;
+			__u32 len;
+		} CO_RE;
+		__u64 hash_len;
+	} CO_RE;
+} CO_RE;
+
+struct dentry {
+	struct dentry *d_parent;
+	struct qstr d_name;
+} CO_RE;
+
 struct path {
 	void *mnt;
-	void *dentry;
+	struct dentry *dentry;
 } CO_RE;
 
 struct file {

@@ -128,6 +128,9 @@ struct dedup_key {
 	__u32 pad;
 	__u64 mnt;
 	__u64 dentry;
+	/* The names on the way up from the file, so a rename of the file or of a
+	 * directory above it is another path, though the dentry stays the same. */
+	__u64 names;
 };
 
 struct {
@@ -439,6 +442,26 @@ static __always_inline int noise(struct file *f)
 	return 0;
 }
 
+/* Directories above a file whose names count toward its dedup key. A rename
+ * deeper up goes unseen. */
+#define DEDUP_DEPTH 16
+
+/* The hashed names of `d` and the directories above it, up to DEDUP_DEPTH. */
+static __always_inline __u64 names_up(struct dentry *d)
+{
+	__u64 h = 0xcbf29ce484222325ULL;
+
+	for (int i = 0; i < DEDUP_DEPTH && d; i++) {
+		struct dentry *parent = d->d_parent;
+
+		h = (h ^ d->d_name.hash_len) * 0x100000001b3ULL;
+		if (parent == d)
+			break;
+		d = parent;
+	}
+	return h;
+}
+
 /* Repeated opens of the same path by the same process within the window. */
 static __always_inline int duplicate(struct file *f)
 {
@@ -446,6 +469,7 @@ static __always_inline int duplicate(struct file *f)
 		.tgid = bpf_get_current_pid_tgid() >> 32,
 		.mnt = (__u64)f->f_path.mnt,
 		.dentry = (__u64)f->f_path.dentry,
+		.names = names_up(f->f_path.dentry),
 	};
 	__u64 now = bpf_ktime_get_boot_ns(), *last;
 
