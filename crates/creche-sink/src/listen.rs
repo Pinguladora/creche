@@ -566,10 +566,27 @@ async fn receive(
             Err(_) => break "read_error",
             Ok(n) => n,
         };
-        let mut lines = Vec::new();
         let now = now_ns();
-        let data = chunk.get(..n).unwrap_or_default();
-        let fed = decoder.feed_at(data, &origin, now, &mut lines);
+        // Decoding may block: the first claim of each container reads its
+        // bundle. One thread runs every stream, so it decodes elsewhere.
+        let done = tokio::task::spawn_blocking({
+            let origin = Arc::clone(&origin);
+            move || {
+                let mut lines = Vec::new();
+                let data = chunk.get(..n).unwrap_or_default();
+                let fed = decoder.feed_at(data, &origin, now, &mut lines);
+                (decoder, chunk, lines, fed)
+            }
+        })
+        .await;
+        let Ok((back, buf, lines, fed)) = done else {
+            eprintln!(
+                "creche-sink: decoding a stream from {} failed",
+                short(origin.id())
+            );
+            return;
+        };
+        (decoder, chunk) = (back, buf);
         // Lines decoded before a corrupt record are still sent.
         if !lines.is_empty() && tx.send(batch(now, lines)).await.is_err() {
             return;
