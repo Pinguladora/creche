@@ -1,0 +1,828 @@
+threagile_version: 1.0.0
+
+# creche: an eBPF observer inside Kata Containers microVMs that streams what AI agent tools do to a sink on the host.
+# Written from the README, SECURITY.md and the ADRs in docs/adr (up to 0019). The runtime only: the development,
+# build and release tooling is left out.
+
+title: creche
+
+date: 2026-11-15
+
+author:
+  name: creche maintainers
+  homepage: https://github.com/Pinguladora/creche
+
+business_criticality: important
+
+business_overview:
+  description: Visibility into what runs inside Kata Containers microVMs. Process trees, outgoing connections and file writes of the tools an AI agent spawns are streamed to the host, attributed to the sandbox and its pod, and kept as a tamper-evident audit trail.
+  images: []
+
+technical_overview:
+  description: An observer in the guest loads BPF programs (aya) and forwards their ring buffer records over hybrid vsock. The sink on the host attests which sandbox a connection comes from, names its pod from containerd's bundles, writes JSON lines with hash chained and SVID signed checkpoints, and exports them over OTLP. A verifier checks saved output against the trust bundle and the pod history.
+  images: []
+
+questions: {}
+
+abuse_cases:
+  Forged Events: A process in the guest sends records the host takes for the observer's.
+  Misattribution: A guest or a host process makes events appear under another sandbox, pod or container.
+  Blinding: The guest floods or stalls the sink so that events of other sandboxes are lost.
+  Audit Rewrite: Whoever takes over a sink or the archive rewrites the audit trail without detection.
+
+security_requirements:
+  Guest Untrusted: Nothing the guest sends may crash, stall or mislead the sink.
+  Host Attests Identity: The sandbox, pod and node of a stream come from the host, never from the guest.
+  Tamper Evident Trail: Missing or changed lines must be detectable by a verifier.
+
+tags_available: []
+
+data_assets:
+
+  Guest Events:
+    id: guest-events
+    description: Process, connect and file write records from the guest, with command arguments, paths and destinations
+    usage: business
+    tags: []
+    origin: Guest kernel
+    owner: Platform Team
+    quantity: very-many
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Command arguments and paths can hold secrets, and the events are the evidence of what an agent did
+
+  Agent Labels:
+    id: agent-labels
+    description: user.creche.agent extended attributes the agents set on their delegated cgroups
+    usage: business
+    tags: []
+    origin: Agents
+    owner: Agent operators
+    quantity: few
+    confidentiality: internal
+    integrity: important
+    availability: operational
+    justification_cia_rating: Claims of the guest, reported next to the uid that owns the cgroup
+
+  Pod Identity:
+    id: pod-identity
+    description: Pod name, namespace and uid from the annotations in the sandbox's OCI spec
+    usage: business
+    tags: []
+    origin: containerd and kubelet
+    owner: Platform Team
+    quantity: many
+    confidentiality: internal
+    integrity: critical
+    availability: important
+    justification_cia_rating: Wrong pod identity attributes events to the wrong workload
+
+  Audit Trail:
+    id: audit-trail
+    description: JSON lines with stream sequence numbers, hash chained checkpoints and their signatures
+    usage: business
+    tags: []
+    origin: creche-sink
+    owner: Security Team
+    quantity: very-many
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: The evidence for incident response, holds the guest events
+
+  Sink Signing Keys:
+    id: sink-keys
+    description: The sink's X.509-SVID and the per stream P-256 keys that sign checkpoints
+    usage: devops
+    tags: []
+    origin: SPIRE
+    owner: Platform Team
+    quantity: few
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Whoever holds them can sign forged checkpoints for the node
+
+  Pod History:
+    id: pod-history
+    description: Lines of pod uid or sandbox id and the node they ran on, and the SPIFFE trust bundle
+    usage: devops
+    tags: []
+    origin: Kubernetes API and SPIRE
+    owner: Security Team
+    quantity: many
+    confidentiality: internal
+    integrity: critical
+    availability: operational
+    justification_cia_rating: The verifier binds each stream to its node with it
+
+technical_assets:
+
+  Agent Workload:
+    id: agent-workload
+    description: The AI agent and the tools it spawns, the untrusted party in the guest
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: The workload creche observes, untrusted by design
+    size: application
+    technologies: [ai-agent]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Agent operators
+    confidentiality: confidential
+    integrity: important
+    availability: operational
+    justification_cia_rating: Runs arbitrary tools
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links:
+      Traced Syscalls:
+        target: creche-bpf
+        description: exec, fork, exit, connect and file opens for writing hit the tracepoints, fentry and LSM hooks, and cgroup labels are read from cgroupfs
+        protocol: inter-process-communication
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [guest-events, agent-labels]
+        data_assets_received: []
+
+  creche BPF Programs:
+    id: creche-bpf
+    description: C BPF programs with CO-RE in the guest kernel, dropping noise in the kernel, a pid indexed task cache and the LSM guard on the observer's vsock port
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: component
+    technologies: [ids]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Run in the guest kernel, see every traced event
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links: {}
+
+  creche Observer:
+    id: creche-observer
+    description: Loads the BPF programs with aya, drains the ring buffer and forwards whole records over vsock, started by systemd before kata-agent
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: service
+    technologies: [ids]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Root in the guest, the only process allowed on the vsock port
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Ring Buffer:
+        target: creche-bpf
+        description: Loads and attaches the programs, then drains their ring buffer at most every 20 ms
+        protocol: inter-process-communication
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [guest-events, agent-labels]
+      Vsock Stream:
+        target: kata-vmm
+        description: Framed wire records to host port 7000, refused to every other guest process by the LSM guard
+        protocol: binary
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [guest-events, agent-labels]
+        data_assets_received: []
+
+  Kata VMM:
+    id: kata-vmm
+    description: Cloud Hypervisor or Firecracker, which bridges guest vsock to a Unix socket on the host
+    type: process
+    usage: business
+    layer: platform
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Part of Kata Containers
+    size: system
+    technologies: [hypervisor]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Kata Containers
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: Holds the whole sandbox
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [guest-events, agent-labels]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Hybrid Vsock:
+        target: creche-sink
+        description: The VMM connects to the sink's clh.sock_7000, mode 0600 and owned by the VMM's user. The sink admits only the VMM the kernel names for that sandbox (ADR 0018), at most 4 connections per sandbox
+        protocol: inter-process-communication
+        authentication: credentials
+        identity: workload
+        authorization: object-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [guest-events, agent-labels]
+        data_assets_received: []
+
+  creche Sink:
+    id: creche-sink
+    description: Decodes the records, attests sandbox and pod, writes JSON lines with SVID signed checkpoints and exports OTLP
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: service
+    technologies: [monitoring]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: creche maintainers
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: Runs on every node, parses input from untrusted guests and holds the signing keys
+    multi_tenant: true
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [guest-events, agent-labels, pod-identity, audit-trail, sink-keys]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Read Bundle:
+        target: containerd-bundles
+        description: Reads the sandbox's OCI spec, accepted only from a root owned private bundle
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [pod-identity]
+      Workload API:
+        target: spire-agent
+        description: Fetches the X.509-SVID over the SPIFFE Workload API Unix socket
+        protocol: inter-process-communication
+        authentication: none
+        identity: workload
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: devops
+        data_assets_sent: []
+        data_assets_received: [sink-keys]
+      Write Archive:
+        target: audit-archive
+        description: JSON lines on stdout, redirected to a file
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail]
+        data_assets_received: []
+      OTLP Export:
+        target: otel-collector
+        description: OTLP over gRPC or HTTP, zstd protobuf, in cleartext to a collector on the node
+        protocol: binary
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail]
+        data_assets_received: []
+
+  containerd Bundles:
+    id: containerd-bundles
+    description: containerd's runtime v2 task directory with each sandbox's config.json
+    type: datastore
+    usage: business
+    layer: platform
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Owned by containerd
+    size: component
+    technologies: [local-file-system]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: internal
+    integrity: critical
+    availability: important
+    justification_cia_rating: Root only
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [pod-identity]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+  SPIRE Agent:
+    id: spire-agent
+    description: Attests the sink and issues its node specific SVID
+    type: process
+    usage: devops
+    layer: platform
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Part of the cluster's SPIRE deployment
+    size: service
+    technologies: [workload-identity]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Issues identities
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [sink-keys]
+    data_assets_stored: []
+    data_formats_accepted: []
+    communication_links: {}
+
+  Audit Archive:
+    id: audit-archive
+    description: The JSON lines file on the node
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: component
+    technologies: [local-file-system]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: The audit trail at rest
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [audit-trail]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+  OTel Collector:
+    id: otel-collector
+    description: A node collector that ships the lines to a second store
+    type: process
+    usage: business
+    layer: platform
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Operated by the platform team
+    size: service
+    technologies: [monitoring]
+    tags: []
+    internet: false
+    machine: container
+    encryption: none
+    owner: Platform Team
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: Carries the audit trail
+    multi_tenant: true
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [audit-trail]
+    data_assets_stored: []
+    data_formats_accepted: [serialization]
+    communication_links:
+      Ship Logs:
+        target: log-store
+        description: Ships the log records to the central store
+        protocol: https
+        authentication: client-certificate
+        identity: workload
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail]
+        data_assets_received: []
+
+  Central Log Store:
+    id: log-store
+    description: The second store that keeps checkpoints out of reach of the node
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Operated by the security team
+    size: system
+    technologies: [database]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: transparent
+    owner: Security Team
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: important
+    justification_cia_rating: The copy of the audit trail a node cannot reach
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [audit-trail]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+  creche Verifier:
+    id: creche-verifier
+    description: creche-sink --verify run by an auditor against saved output, a trust bundle, the sink SPIFFE IDs and the pod history
+    type: process
+    usage: business
+    used_as_client_by_human: true
+    out_of_scope: false
+    size: application
+    technologies: [cli]
+    tags: []
+    internet: false
+    machine: physical
+    encryption: none
+    owner: Security Team
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Decides whether the trail is intact
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: true
+    data_assets_processed: [audit-trail, pod-history]
+    data_assets_stored: []
+    data_formats_accepted: [json, file]
+    communication_links:
+      Read Evidence:
+        target: audit-evidence
+        description: Reads the exported lines, the trust bundle and the pod history named on its command line
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [audit-trail, pod-history]
+
+  Audit Evidence:
+    id: audit-evidence
+    description: The files the auditor exported for a check, the stream lines, the trust bundle and the pod history
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    size: component
+    technologies: [local-file-system]
+    tags: []
+    internet: false
+    machine: physical
+    encryption: none
+    owner: Security Team
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: A changed export misleads the check
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: []
+    data_assets_stored: [audit-trail, pod-history]
+    data_formats_accepted: [json, file]
+    communication_links: {}
+
+  Evidence Export:
+    id: evidence-export
+    description: The auditor's own tools that export the stream lines from the central store and the pod history from the cluster, such as the store's client and kubectl
+    type: process
+    usage: business
+    used_as_client_by_human: true
+    out_of_scope: true
+    justification_out_of_scope: The auditor's tools, not part of creche
+    size: application
+    technologies: [cli]
+    tags: []
+    internet: false
+    machine: physical
+    encryption: none
+    owner: Security Team
+    confidentiality: confidential
+    integrity: critical
+    availability: operational
+    justification_cia_rating: Produces what the verifier checks
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed: [audit-trail, pod-history]
+    data_assets_stored: []
+    data_formats_accepted: [json]
+    communication_links:
+      Export Trail:
+        target: log-store
+        description: Exports the stream lines to verify
+        protocol: https
+        authentication: token
+        identity: end-user
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent: []
+        data_assets_received: [audit-trail]
+      Export Pod History:
+        target: kube-api
+        description: Pod uids and the nodes they ran on
+        protocol: https
+        authentication: token
+        identity: end-user
+        authorization: function-level
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: devops
+        data_assets_sent: []
+        data_assets_received: [pod-history]
+      Write Evidence:
+        target: audit-evidence
+        description: Saves the exports for the verifier
+        protocol: local-file-access
+        authentication: none
+        identity: none
+        authorization: none
+        tags: []
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent: [audit-trail, pod-history]
+        data_assets_received: []
+
+  Kubernetes API:
+    id: kube-api
+    description: The cluster's API server
+    type: process
+    usage: devops
+    layer: platform
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Part of the cluster
+    size: system
+    technologies: [container-platform]
+    tags: []
+    internet: false
+    machine: virtual
+    encryption: none
+    owner: Platform Team
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: The cluster
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed: [pod-history]
+    data_assets_stored: [pod-history]
+    data_formats_accepted: [json]
+    communication_links: {}
+
+trust_boundaries:
+
+  Kata Guest:
+    id: kata-guest
+    description: The microVM with its own kernel, untrusted by the host
+    type: execution-environment
+    tags: []
+    technical_assets_inside: [agent-workload, creche-bpf, creche-observer]
+    trust_boundaries_nested: []
+
+  Node:
+    id: node
+    description: A Kubernetes node running Kata sandboxes
+    type: execution-environment
+    tags: []
+    technical_assets_inside: [kata-vmm, creche-sink, containerd-bundles, spire-agent, audit-archive, otel-collector]
+    trust_boundaries_nested: [kata-guest]
+
+  Cluster Network:
+    id: cluster-network
+    description: The cluster and its control plane
+    type: network-cloud-security-group
+    tags: []
+    technical_assets_inside: [kube-api]
+    trust_boundaries_nested: [node]
+
+  Security Backend:
+    id: security-backend
+    description: Where the audit trail is kept and checked, out of reach of the nodes
+    type: network-cloud-provider
+    tags: []
+    technical_assets_inside: [log-store, creche-verifier, audit-evidence, evidence-export]
+    trust_boundaries_nested: []
+
+shared_runtimes:
+
+  Guest Kernel:
+    id: guest-kernel
+    description: Kata's guest kernel with BTF, fentry and BPF LSM, shared by the agent and the observer
+    tags: []
+    technical_assets_running: [agent-workload, creche-bpf, creche-observer]
+
+  Host Kernel:
+    id: host-kernel
+    description: The node's kernel, shared by the VMM, the sink and the node agents
+    tags: []
+    technical_assets_running: [kata-vmm, creche-sink, spire-agent, otel-collector]
+
+custom_risk_categories: []
+
+# Risks of the integrator's own deployment are accepted here and left to it.
+risk_tracking:
+
+  # The guest and the sink
+
+  untrusted-deserialization@creche-sink:
+    status: mitigated
+    justification: Records are decoded with bounds checks (ADR 0004) and fuzzed.
+    date: 2026-11-14
+
+  untrusted-deserialization@creche-observer:
+    status: mitigated
+    justification: The observer forwards records without decoding them (ADR 0004) and checks agent labels before sending them (ADR 0017).
+    date: 2026-11-14
+
+  path-traversal@creche-sink@containerd-bundles@creche-sink>read-bundle:
+    status: mitigated
+    justification: Sandbox ids must be containerd identifiers, and bundles must be private to root (ADR 0010).
+    date: 2026-11-14
+
+  path-traversal@creche-sink@audit-archive@creche-sink>write-archive:
+    status: false-positive
+    justification: The sink writes to stdout only.
+    date: 2026-11-14
+
+  wrong-communication-link-content@creche-observer@creche-observer>ring-buffer:
+    status: false-positive
+    justification: Configuration written into the programs before they load, not a data asset.
+    date: 2026-11-14
+
+  # Audit trail at rest and its checks
+
+  missing-hardening@audit-archive:
+    status: accepted
+    justification: The archive is the integrator's (ADR 0012).
+    date: 2026-11-14
+
+  unencrypted-asset@audit-archive:
+    status: accepted
+    justification: Encryption at rest is the integrator's.
+    date: 2026-11-14
+
+  missing-file-validation@creche-verifier:
+    status: false-positive
+    justification: The verifier reads files named on its command line, not uploads.
+    date: 2026-11-14
+
+  missing-identity-store@log-store:
+    status: accepted
+    justification: Identities come from SPIRE and the cluster.
+    date: 2026-11-14
+
+  path-traversal@creche-verifier@audit-evidence@creche-verifier>read-evidence:
+    status: false-positive
+    justification: The verifier opens only the files named on its command line.
+    date: 2026-11-14
+
+  missing-hardening@audit-evidence:
+    status: accepted
+    justification: The exports are the auditor's.
+    date: 2026-11-14
+
+  unencrypted-asset@audit-evidence:
+    status: accepted
+    justification: Encryption at rest is the auditor's.
+    date: 2026-11-14
+
+  missing-cloud-hardening@cluster-network:
+    status: accepted
+    justification: The cluster is the integrator's.
+    date: 2026-11-14
+
+  missing-cloud-hardening@security-backend:
+    status: accepted
+    justification: The security backend is the integrator's.
+    date: 2026-11-14
+
+  # Left to the integrator, or outside this model
+
+  missing-build-infrastructure@creche-sink:
+    status: accepted
+    justification: Building and releasing are outside this model.
+    date: 2026-11-15
+
+  tenant-resource-exhaustion@creche-sink@kata-vmm>hybrid-vsock:
+    status: in-progress
+    justification: Each sandbox gets bounded connections, queues and caches.
+    date: 2026-11-15
+
+  virtual-machine-escape@kata-vmm@creche-sink:
+    status: accepted
+    justification: Isolation is Kata's and the hypervisor's (ADR 0018).
+    date: 2026-11-15
+
+  virtual-machine-escape@kata-vmm@audit-archive:
+    status: accepted
+    justification: Isolation is Kata's and the hypervisor's (ADR 0012).
+    date: 2026-11-15
