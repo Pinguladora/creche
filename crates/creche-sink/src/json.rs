@@ -212,6 +212,26 @@ pub fn render(
     seq: u64,
     out: &mut Vec<u8>,
 ) {
+    render_judged(origin, record, task, cgroup, None, observed_ns, seq, out);
+}
+
+/// [`render`], with the sink's verdict on a hello's guard claim (see
+/// [`crate::guard`]) when it has one. A hello whose claim the sink does not take
+/// says `creche.observer.guarded: false` and `creche.observer.guard_claimed: true`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "render's arguments plus the verdict, all needed per line"
+)]
+pub fn render_judged(
+    origin: &Origin,
+    record: &Record<'_>,
+    task: Option<&TaskInfo>,
+    cgroup: Option<&Cgroup>,
+    guarded: Option<bool>,
+    observed_ns: u64,
+    seq: u64,
+    out: &mut Vec<u8>,
+) {
     let h = &record.header;
     let mut line = Line::start(out, origin);
     line.str(key!("event.name"), event_name(h.kind));
@@ -273,11 +293,15 @@ pub fn render(
         Body::Hello { version, flags } => {
             line.num(key!("creche.wire.version"), version);
             line.num(key!("creche.observer.flags"), flags.bits());
-            let guarded = flags.contains(HelloFlags::GUARDED);
+            let claimed = flags.contains(HelloFlags::GUARDED);
+            let guarded = guarded.unwrap_or(claimed);
             line.raw(
                 key!("creche.observer.guarded"),
                 if guarded { "true" } else { "false" },
             );
+            if claimed && !guarded {
+                line.raw(key!("creche.observer.guard_claimed"), "true");
+            }
         }
         Body::Heartbeat(hb) => {
             line.num(key!("creche.observer.ringbuf_drops"), hb.ringbuf_drops);

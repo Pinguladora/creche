@@ -44,8 +44,10 @@ kernel with BTF. They use a minimal header instead of libbpf or a generated
   refuses the observer's vsock port to every other guest process, so a workload
   cannot send records the host would take for the observer's. The guard counts
   the connects it sees, the observer's own included, so the observer knows it
-  runs and says so in its hello record (`creche.observer.guarded`). Kernels
-  without BPF LSM still work, reported as unguarded.
+  runs and says so in its hello record. The sink takes that claim only when the
+  sandbox's first hello made it too and no two of its streams send at once, and
+  writes its verdict as `creche.observer.guarded`. Kernels without BPF LSM still
+  work, reported as unguarded.
 - **Whole records only.** The forwarding queue is bounded and never splits a record
   across connections. Heartbeats report drops so silence can be told from blindness.
 - **The host attests the sandbox.** Each sandbox's socket is mode 0600, owned by
@@ -185,11 +187,15 @@ the pipelines they already feed.
   `creche.process.fork`, `creche.process.exit`, `creche.network.connect`,
   `creche.file.open_write`, `creche.observer.hello` and
   `creche.observer.heartbeat`. `observed_time_unix_nano` is the host's clock when
-  the event arrived: the guest only knows its own boot time.
+  the event arrived: the guest only knows its own boot time. A hello's
+  `creche.observer.guarded` is the sink's verdict on the observer's claim, and
+  `creche.observer.guard_claimed: true` marks a claim it did not take.
 - **Audit trail** (JSON only): each connection is a stream with its own
   `creche.stream.id`, opened by a `creche.stream.start` line naming the peer
   (`creche.peer.pid`, `creche.peer.uid`) and closed by `creche.stream.end` with
-  `creche.stream.end_reason` (`closed`, `read_error` or `corrupt`). Every line of a
+  `creche.stream.end_reason` (`closed`, `read_error` or `corrupt`). A
+  `creche.stream.unguarded` line, with `creche.stream.unguarded_reason`
+  `concurrent_streams`, says the stream no longer counts as guarded. Every line of a
   stream has `creche.seq`, counting from 0. A `creche.audit.checkpoint` line
   follows once 256 lines or a second have passed and when the stream ends. It
   covers `creche.seq.first` to `creche.seq.last` with
