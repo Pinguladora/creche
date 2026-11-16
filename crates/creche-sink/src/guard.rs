@@ -22,6 +22,9 @@
 //!   read, being more than any buffer holds. Each open
 //!   stream keeps when that hello was, so neither more hellos nor more
 //!   connections put it off.
+//! - The observer opens every connection with a hello. A stream whose first
+//!   record is anything else is not the observer, so the port is not guarded
+//!   (ADR 0020).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -34,6 +37,26 @@ pub const STALE_NS: u64 = 2_000_000_000;
 /// hello: more than the socket buffers between the guest and the sink hold.
 pub const STALE_BYTES: u64 = 4 << 20; // 4 MiB
 
+/// What showed that a sandbox's port is not guarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Breach {
+    /// Two streams sent at once.
+    ConcurrentStreams,
+    /// A stream did not open with a hello, so it was not the observer.
+    NoHello,
+}
+
+impl Breach {
+    /// Its `creche.stream.unguarded_reason`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ConcurrentStreams => "concurrent_streams",
+            Self::NoHello => "no_hello",
+        }
+    }
+}
+
 /// The guard evidence of one sandbox, shared by its streams.
 #[derive(Debug, Default)]
 pub struct Guard {
@@ -44,8 +67,10 @@ pub struct Guard {
     /// The open streams by number, each with what it did since a newer stream
     /// first said hello. Only open streams, so it stays small.
     open: Mutex<HashMap<u64, Seen>>,
-    /// Whether two streams were seen sending at once.
+    /// Whether the sandbox was shown not to be guarded.
     breached: AtomicBool,
+    /// How, the first time: see [`Breach`].
+    reason: OnceLock<Breach>,
 }
 
 impl Guard {
@@ -63,10 +88,33 @@ impl Guard {
         self.open.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether two streams of the sandbox were seen sending at once.
+    /// Whether the sandbox was shown not to be guarded.
     #[must_use]
     pub fn breached(&self) -> bool {
         self.breached.load(Ordering::SeqCst)
+    }
+
+    /// What showed it first, once it was.
+    #[must_use]
+    pub fn breach(&self) -> Option<Breach> {
+        self.reason.get().copied()
+    }
+
+    fn breached_by(&self, how: Breach) {
+        self.reason.get_or_init(|| how);
+        self.breached.store(true, Ordering::SeqCst);
+    }
+
+    /// Opens the window of every stream older than `stream`, at `now_ns`, if
+    /// it is not open yet.
+    fn newer_at(&self, stream: u64, now_ns: u64) {
+        for (_, seen) in self
+            .streams()
+            .iter_mut()
+            .filter(|(older, _)| **older < stream)
+        {
+            seen.since_ns.get_or_insert(now_ns);
+        }
     }
 }
 
@@ -91,26 +139,21 @@ pub struct Handle {
 impl Handle {
     /// The stream said hello at `now_ns`, claiming the port is guarded or not.
     /// Returns whether the sink takes it as guarded: it claims so, the
-    /// sandbox's first hello claimed so, and no two streams sent at once.
+    /// sandbox's first hello claimed so, and nothing showed the port is not
+    /// guarded (see [`Breach`]).
     #[must_use]
     pub fn hello(&self, claimed: bool, now_ns: u64) -> bool {
         let first = *self.guard.first.get_or_init(|| claimed);
-        for (_, seen) in self
-            .guard
-            .streams()
-            .iter_mut()
-            .filter(|(older, _)| **older < self.stream)
-        {
-            seen.since_ns.get_or_insert(now_ns);
-        }
+        self.guard.newer_at(self.stream, now_ns);
         claimed && first && !self.guard.breached()
     }
 
     /// The stream delivered `bytes` at `now_ns`, read after the sink held it
-    /// back for `held_ns`. Returns whether two streams of the sandbox have now
-    /// been seen sending at once: since a newer stream said hello, more than
-    /// [`STALE_NS`] went by that the sink did not hold the stream back, or more
-    /// than [`STALE_BYTES`] came.
+    /// back for `held_ns`. Returns whether the sandbox's port has now been shown
+    /// not to be guarded: by a stream that did not open with a hello, or by two
+    /// streams sending at once, which is when, since a newer stream said hello,
+    /// more than [`STALE_NS`] went by that the sink did not hold the stream
+    /// back, or more than [`STALE_BYTES`] came.
     #[must_use]
     pub fn sent(&self, now_ns: u64, bytes: usize, held_ns: u64) -> bool {
         let mut streams = self.guard.streams();
@@ -124,17 +167,22 @@ impl Handle {
             seen.held_ns = seen.held_ns.saturating_add(held_ns).min(elapsed);
             let late = elapsed.saturating_sub(seen.held_ns) > STALE_NS;
             if late || seen.bytes > STALE_BYTES {
-                self.guard.breached.store(true, Ordering::SeqCst);
+                drop(streams);
+                self.guard.breached_by(Breach::ConcurrentStreams);
             }
         }
-        drop(streams);
         self.guard.breached()
     }
 
-    /// Whether two streams of the sandbox were seen sending at once.
+    /// The stream's first record was not a hello, so it is not the observer.
+    pub fn not_observer(&self) {
+        self.guard.breached_by(Breach::NoHello);
+    }
+
+    /// What showed the sandbox not to be guarded, once something did.
     #[must_use]
-    pub fn breached(&self) -> bool {
-        self.guard.breached()
+    pub fn breach(&self) -> Option<Breach> {
+        self.guard.breach()
     }
 }
 
@@ -238,6 +286,20 @@ mod tests {
             breached = old.sent(i * STALE_NS / 2, 10, hold);
         }
         assert!(breached);
+    }
+
+    #[test]
+    fn a_stream_that_is_not_the_observer_breaks_the_guard_at_once() {
+        let guard = Arc::default();
+        let observer = Guard::open(&guard);
+        assert!(observer.hello(true, 0));
+        let intruder = Guard::open(&guard);
+        intruder.not_observer();
+        assert_eq!(observer.breach(), Some(Breach::NoHello));
+        assert!(!Guard::open(&guard).hello(true, 1));
+        // The first reason stays.
+        assert!(observer.sent(LATE, 1, 0));
+        assert_eq!(guard.breach(), Some(Breach::NoHello));
     }
 
     #[test]
