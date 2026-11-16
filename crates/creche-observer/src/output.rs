@@ -59,31 +59,33 @@ impl Output {
         }
     }
 
-    /// Sends the queued records, connecting first if needed. A failed connection
-    /// is dropped and retried on the next call. The records stay queued. A new
-    /// connection starts with the record `hello` builds once it is connected.
+    /// Connects if not connected. A new connection starts with the record
+    /// `hello` builds. A failed attempt is retried on the next call.
     ///
     /// Returns `true` when this call reconnected: the host may have lost records
-    /// sent on the previous connection.
-    pub fn send<H: AsRef<[u8]>>(
-        &mut self,
-        queue: &mut RecordQueue,
-        hello: impl FnOnce() -> H,
-    ) -> bool {
-        let mut reconnected = false;
-        if self.conn.is_none() {
-            self.conn = self.connect(hello).ok();
-            if self.conn.is_some() {
-                reconnected = self.connected_before;
-                self.connected_before = true;
-            }
+    /// sent on the previous connection, and it knows nothing of what was said on
+    /// it.
+    pub fn connect_if_needed<H: AsRef<[u8]>>(&mut self, hello: impl FnOnce() -> H) -> bool {
+        if self.conn.is_some() {
+            return false;
         }
+        self.conn = self.connect(hello).ok();
+        if self.conn.is_none() {
+            return false;
+        }
+        let reconnected = self.connected_before;
+        self.connected_before = true;
+        reconnected
+    }
+
+    /// Sends the queued records, when connected. A failed connection is
+    /// dropped and the records stay queued.
+    pub fn flush(&mut self, queue: &mut RecordQueue) {
         if let Some(conn) = &mut self.conn
             && queue.flush(conn).is_err()
         {
             self.conn = None;
         }
-        reconnected
     }
 
     fn connect<H: AsRef<[u8]>>(&self, hello: impl FnOnce() -> H) -> io::Result<Conn> {

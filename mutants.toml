@@ -15,6 +15,7 @@ examine_globs = [
     "crates/creche-sink/src/peer.rs",
     "crates/creche-sink/src/k8s.rs",
     "crates/creche-observer/src/cgroups.rs",
+    "crates/creche-observer/src/context.rs",
 ]
 test_tool = "nextest"
 exclude_re = [
