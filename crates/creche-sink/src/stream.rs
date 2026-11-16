@@ -81,6 +81,19 @@ fn opened(state: &mut JsonState, hello: bool) {
     }
 }
 
+/// Claims the container of `pid` from its cgroup's described path, when it was
+/// claimed from the leaf name alone because the description came later. Once.
+fn claim_late(state: &mut JsonState, pid: u32) {
+    if let Some(containers) = state.containers.as_mut()
+        && let Some(task) = state.tasks.get_mut(pid)
+        && !task.claimed_from_path
+        && let Some(described) = state.cgroups.get(task.cgroup_id)
+    {
+        task.claimed_from_path = true;
+        task.container = containers.claim(described.container_scope());
+    }
+}
+
 /// Renders `record` with what the stream knows of its process and of the
 /// process's cgroup, and for a hello, the sink's verdict on its guard claim.
 fn render(
@@ -330,11 +343,10 @@ fn render_all(
                 if let Some(containers) = state.containers.as_mut() {
                     // The path, when known, names the container a nested
                     // cgroup sits in. The leaf name alone does not.
-                    let scope = state
-                        .cgroups
-                        .get(context.cgroup_id)
-                        .map_or(&*info.cgroup, Cgroup::container_scope);
+                    let described = state.cgroups.get(context.cgroup_id);
+                    let scope = described.map_or(&*info.cgroup, Cgroup::container_scope);
                     info.container = containers.claim(scope);
+                    info.claimed_from_path = described.is_some();
                 }
                 state.tasks.set(pid, info);
             }
@@ -348,20 +360,24 @@ fn render_all(
                 .set(cgroup_id, Cgroup::new(path, owner_uid, labels)),
             Body::Exec { context, .. } => {
                 state.tasks.exec(pid, &context);
+                claim_late(state, pid);
                 let seq = next(&mut state.seq);
                 render(origin, &record, state, observed_ns, seq, out);
             }
             Body::Fork { ppid } => {
                 state.tasks.fork(ppid, pid);
+                claim_late(state, pid);
                 let seq = next(&mut state.seq);
                 render(origin, &record, state, observed_ns, seq, out);
             }
             Body::Exit { .. } => {
+                claim_late(state, pid);
                 let seq = next(&mut state.seq);
                 render(origin, &record, state, observed_ns, seq, out);
                 state.tasks.exit(pid);
             }
             _ => {
+                claim_late(state, pid);
                 let seq = next(&mut state.seq);
                 render(origin, &record, state, observed_ns, seq, out);
             }
@@ -764,6 +780,40 @@ mod tests {
         let l = lines(&out);
         assert_eq!(l[0]["creche.guest.agent.name"], "first");
         assert_eq!(l[1]["creche.guest.agent.name"], "second");
+    }
+
+    #[test]
+    fn a_container_is_claimed_once_its_cgroup_is_described_late() {
+        use std::sync::Arc;
+
+        let ours = "5f473572d1da5189480c50a0dc42ef5d19c1f6d1da83dc6f281837d987c78933";
+        let tmp = bundles(&[(ours, "sb")]);
+        let sh = *b"sh\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let data = [
+            // The observer could not describe the cgroup in time: its leaf
+            // name names no container.
+            task_in(10, 1, &sh, 5, b"planner\0"),
+            fork(11, 10),
+            cgroup(
+                5,
+                0,
+                &format!("/kubepods/cri-containerd-{ours}.scope/planner"),
+                &[],
+            ),
+            fork(12, 10),
+            fork(13, 12),
+        ]
+        .concat();
+        let containers = Containers::new(Arc::from(tmp.path()), Arc::from("sb"));
+        let mut out = Vec::new();
+        StreamDecoder::new(Format::Json)
+            .with_containers(containers)
+            .feed_at(&data, &"sb".into(), 7, &mut out)
+            .unwrap();
+        let l = lines(&out);
+        assert!(l[0].get("creche.guest.container.id").is_none());
+        assert_eq!(l[1]["creche.guest.container.id"], ours);
+        assert_eq!(l[2]["creche.guest.container.id"], ours);
     }
 
     #[test]

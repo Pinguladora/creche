@@ -28,6 +28,9 @@ pub struct TaskInfo {
     /// The pod's container the guest claims for that cgroup, when the host
     /// confirms it belongs to this sandbox.
     pub container: Option<Arc<Container>>,
+    /// Whether the container was claimed from the cgroup's described path. A
+    /// claim from the leaf name alone is made again once the path is known.
+    pub claimed_from_path: bool,
 }
 
 impl TaskInfo {
@@ -42,6 +45,7 @@ impl TaskInfo {
             comm: lossy(context.comm),
             cgroup: lossy(cgroup),
             container: None,
+            claimed_from_path: false,
         }
     }
 }
@@ -94,6 +98,11 @@ impl Tasks {
         self.by_pid.get(&pid)
     }
 
+    /// The context of `pid`, to change.
+    pub fn get_mut(&mut self, pid: u32) -> Option<&mut TaskInfo> {
+        self.by_pid.get_mut(&pid)
+    }
+
     /// Records the context of `pid`, replacing any earlier one.
     pub fn set(&mut self, pid: u32, info: TaskInfo) {
         if self.by_pid.len() >= MAX_TASKS
@@ -120,9 +129,15 @@ impl Tasks {
     /// follows from it, which only task records carry. The guest sends one
     /// first when the cgroup changed.
     pub fn exec(&mut self, pid: u32, context: &Context<'_>) {
-        let (cgroup, container) = self.by_pid.get(&pid).map_or_else(
-            || (Arc::from(""), None),
-            |known| (Arc::clone(&known.cgroup), known.container.clone()),
+        let (cgroup, container, claimed_from_path) = self.by_pid.get(&pid).map_or_else(
+            || (Arc::from(""), None, false),
+            |known| {
+                (
+                    Arc::clone(&known.cgroup),
+                    known.container.clone(),
+                    known.claimed_from_path,
+                )
+            },
         );
         let comm = match self.by_pid.get(&pid) {
             Some(known) if known.comm.as_bytes() == context.comm => Arc::clone(&known.comm),
@@ -137,6 +152,7 @@ impl Tasks {
                 comm,
                 cgroup,
                 container,
+                claimed_from_path,
             },
         );
     }
@@ -165,6 +181,7 @@ mod tests {
             comm: comm.into(),
             cgroup: "cri-containerd-x.scope".into(),
             container: None,
+            claimed_from_path: false,
         }
     }
 
