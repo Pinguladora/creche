@@ -382,14 +382,18 @@ impl Report {
         self.unreadable == 0 && self.streams.values().all(|s| s.problems.is_empty())
     }
 
-    /// Whether the report also shows every stream whole: intact, and ended.
-    /// A stream without its end line may have lost lines after its last
+    /// Whether the report also shows every stream whole: intact, ended, and
+    /// every line covered by a matching checkpoint. A stream without its end line may have lost lines after its last
     /// checkpoint, the end line among them, with no trace. It may also just be
     /// running still, or its sink may have stopped, so that is no problem of
     /// its own.
     #[must_use]
     pub fn complete(&self) -> bool {
-        self.intact() && self.streams.values().all(|s| s.ended)
+        self.intact()
+            && self
+                .streams
+                .values()
+                .all(|s| s.ended && s.verified == s.lines)
     }
 }
 
@@ -839,7 +843,6 @@ fn check(
     drop_repeats(lines, checkpoints, status);
     // Checkpoints before the first break in the numbering still verify.
     let gap = first_gap(lines);
-    let numbered = gap.as_ref().map_or(u64::MAX, |(at, _)| *at);
     if let Some(pair) = checkpoints.windows(2).find(|w| w[0].first == w[1].first) {
         status.problems.push(format!(
             "two different checkpoints start at line {}",
@@ -864,8 +867,12 @@ fn check(
             ));
             return;
         }
-        if checkpoint.last >= numbered {
-            status.problems.extend(gap.map(|(_, problem)| problem));
+        // A checkpoint reaching the break reports it. Without a break, one
+        // reaching past the last line is caught below like any other.
+        if let Some((at, problem)) = &gap
+            && checkpoint.last >= *at
+        {
+            status.problems.push(problem.clone());
             return;
         }
         let covered = usize::try_from(checkpoint.first)
@@ -1131,6 +1138,25 @@ mod tests {
             s.problems,
             ["lines 512 to 600 of an ended stream have no checkpoint"]
         );
+    }
+
+    #[test]
+    fn a_checkpoint_claiming_lines_past_the_last_fails() {
+        let out = String::from_utf8(stream(10)).unwrap();
+        // One event line changed, and the checkpoint stretched to the last
+        // possible line so the chain is never compared.
+        let edited = out.replacen("\"creche.seq\":3,", "\"creche.seq\":3,\"x\":1,", 1);
+        assert_ne!(edited, out);
+        for last in [u64::MAX, 11, 12] {
+            let forged = edited.replace(
+                "\"creche.seq.last\":10",
+                &format!("\"creche.seq.last\":{last}"),
+            );
+            assert_ne!(forged, edited, "{last}");
+            let report = verify(forged.as_bytes(), None);
+            assert!(!report.intact(), "{last}: {report}");
+            assert!(!report.complete(), "{last}");
+        }
     }
 
     #[test]
