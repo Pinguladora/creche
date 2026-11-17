@@ -98,6 +98,25 @@ impl RecordQueue {
         self.queued_bytes().saturating_add(len) <= self.capacity
     }
 
+    /// The whole records waiting to be sent, in order.
+    pub fn backlog(&self) -> impl Iterator<Item = &[u8]> {
+        let mut rest = self.buf.get(self.head..).unwrap_or_default();
+        core::iter::from_fn(move || {
+            let len = peek_len(rest)?;
+            let (record, tail) = rest.split_at_checked(len)?;
+            rest = tail;
+            Some(record)
+        })
+    }
+
+    /// Puts `records`, whole records, in front of those waiting, for the next
+    /// connection to send first. Past the capacity if need be: they explain
+    /// records already queued.
+    pub fn prepend(&mut self, records: &[u8]) {
+        self.buf
+            .splice(self.head..self.head, records.iter().copied());
+    }
+
     /// Unsent bytes, including any partially sent record.
     #[must_use]
     pub fn queued_bytes(&self) -> usize {
@@ -282,6 +301,26 @@ mod tests {
         assert!(q.fits(40));
         assert!(!q.fits(41));
         assert_eq!(q.dropped_bytes(), 0);
+    }
+
+    #[test]
+    fn records_put_in_front_go_out_first() {
+        let mut q = RecordQueue::new(1024);
+        assert!(q.push(&rec(20, 1)));
+        // A first flush breaks after the first record went out whole.
+        let mut out = Flaky {
+            chunk: 30,
+            fail_after: Some(1),
+            ..Flaky::default()
+        };
+        assert!(q.push(&rec(24, 2)));
+        assert!(q.flush(&mut out).is_err());
+        let waiting: Vec<&[u8]> = q.backlog().collect();
+        assert_eq!(waiting, [&rec(24, 2)[..]]);
+        q.prepend(&[rec(16, 3), rec(16, 4)].concat());
+        let mut next = writer(1024);
+        q.flush(&mut next).unwrap();
+        assert_eq!(next.written, [rec(16, 3), rec(16, 4), rec(24, 2)].concat());
     }
 
     #[test]

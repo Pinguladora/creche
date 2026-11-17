@@ -128,7 +128,7 @@ pub struct Header {
 
 /// Layout of a task record. Sent truncated to the used part of `cgroup`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, FromBytes, KnownLayout, Immutable)]
+#[derive(Clone, Copy, Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
 pub struct TaskRecord {
     /// Common header.
     pub header: Header,
@@ -300,6 +300,41 @@ pub fn encode_cgroup(
         head.copy_from_slice(part);
         rest = tail;
     }
+    Some(len)
+}
+
+/// Writes a task record into `out` and returns its length, or `None` when `out`
+/// is too short. `comm` is cut to [`COMM_LEN`] - 1 bytes and `cgroup` to
+/// [`CGROUP_LEN`] - 1, each NUL-terminated, and the record ends after the
+/// cgroup name's NUL, as the BPF programs send it.
+#[must_use]
+pub fn encode_task(
+    header: Header,
+    context: &Context<'_>,
+    cgroup: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut rec = TaskRecord::new_zeroed();
+    rec.ppid = context.ppid;
+    rec.uid = context.uid;
+    rec.cgroup_id = context.cgroup_id;
+    for (to, from) in rec.comm.iter_mut().zip(context.comm).take(COMM_LEN - 1) {
+        *to = *from;
+    }
+    let name = cgroup.get(..cgroup.len().min(CGROUP_LEN - 1))?;
+    for (to, from) in rec.cgroup.iter_mut().zip(name) {
+        *to = *from;
+    }
+    let len = core::mem::offset_of!(TaskRecord, cgroup)
+        .checked_add(name.len())?
+        .checked_add(1)?;
+    rec.header = Header {
+        kind: Kind::Task.code(),
+        len: u16::try_from(len).ok()?,
+        ..header
+    };
+    let bytes = rec.as_bytes().get(..len)?;
+    out.get_mut(..len)?.copy_from_slice(bytes);
     Some(len)
 }
 

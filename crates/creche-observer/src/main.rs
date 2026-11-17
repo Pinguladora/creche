@@ -12,6 +12,7 @@ mod metrics;
 mod output;
 
 use std::os::fd::AsFd as _;
+use std::path::Path;
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ use zerocopy::IntoBytes as _;
 use crate::bpf::{Probes, Stage};
 use crate::output::{Output, Target};
 use creche_observer::cgroups::{CGROUP_ROOT, Cgroups};
+use creche_observer::context;
 use creche_observer::queue::RecordQueue;
 
 /// Heartbeat period, also the longest the observer sleeps when idle.
@@ -226,9 +228,15 @@ fn run(args: &Args) -> Result<()> {
             // would wake the loop at once until the host reads.
             let _counted = queue.push_control(heartbeat.as_bytes());
         }
-        let reconnected = output.send(&mut queue, || hello(probes.guarded()).as_bytes().to_vec());
+        if output.connect_if_needed(|| hello(probes.guarded()).as_bytes().to_vec()) {
+            // The host knows nothing of what the last connection said: queued
+            // records go out with their context in front of them.
+            restore_context(&mut queue, &mut cgroups, pid);
+            probes.resync_tasks()?;
+        }
+        output.flush(&mut queue);
         // Records may have been lost, task and cgroup records among them.
-        if reconnected || queue.dropped_bytes() != dropped {
+        if queue.dropped_bytes() != dropped {
             dropped = queue.dropped_bytes();
             cgroups.forget();
             probes.resync_tasks()?;
@@ -281,4 +289,19 @@ fn forward_deferred(queue: &mut RecordQueue, cgroups: &mut Cgroups, pid: u32) {
     for id in ready {
         cgroups.defer(id);
     }
+}
+
+/// Puts the context of the queued records in front of them for a new
+/// connection, the host knowing nothing of what the last one said (see
+/// [`context`]).
+fn restore_context(queue: &mut RecordQueue, cgroups: &mut Cgroups, pid: u32) {
+    cgroups.forget();
+    context::restore(
+        queue,
+        cgroups,
+        pid,
+        metrics::boottime_ns(),
+        Path::new("/proc"),
+        Path::new(CGROUP_ROOT),
+    );
 }

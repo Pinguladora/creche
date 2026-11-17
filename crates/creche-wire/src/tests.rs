@@ -821,3 +821,50 @@ proptest! {
         );
     }
 }
+
+#[test]
+fn encoded_task_records_decode_to_their_fields() {
+    let mut out = [0; MAX_RECORD_LEN];
+    let header = Header::for_observer(Kind::Exit, 0, 42, 7);
+    let context = |comm| Context {
+        ppid: 1,
+        uid: 1000,
+        cgroup_id: 9,
+        comm,
+    };
+    let len = encode_task(header, &context(b"sh"), b"planner", &mut out).unwrap();
+    let rec = decode_one(&out[..len]);
+    assert_eq!(
+        (rec.header.kind, rec.header.pid, rec.header.ts_ns),
+        (Kind::Task.code(), 42, 7)
+    );
+    let Body::Task {
+        context: got,
+        cgroup,
+    } = rec.body
+    else {
+        panic!("not a task record");
+    };
+    assert_eq!(
+        (got.ppid, got.uid, got.cgroup_id, got.comm, cgroup),
+        (1, 1000, 9, &b"sh"[..], &b"planner"[..])
+    );
+    // Names longer than their fields are cut, still NUL-terminated.
+    let len = encode_task(header, &context(&[b'c'; 40]), &[b'g'; 200], &mut out).unwrap();
+    let Body::Task {
+        context: got,
+        cgroup,
+    } = decode_one(&out[..len]).body
+    else {
+        panic!("not a task record");
+    };
+    assert_eq!(
+        (got.comm.len(), cgroup.len()),
+        (COMM_LEN - 1, CGROUP_LEN - 1)
+    );
+    // Too short an output.
+    assert_eq!(
+        encode_task(header, &context(b"a"), b"b", &mut [0; 20]),
+        None
+    );
+}

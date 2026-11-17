@@ -131,6 +131,15 @@ impl Cgroups {
         self.next_walk_ns = ts_ns.saturating_add(gap);
     }
 
+    /// Maps every cgroup now, at `ts_ns`, if one of `ids` is not mapped yet,
+    /// so that each can be described at once. For a new connection, whose
+    /// queued records need them before they go out.
+    pub fn map(&mut self, ids: &[u64], ts_ns: u64) {
+        if ids.iter().any(|id| !self.paths.contains_key(id)) {
+            self.walk(ts_ns);
+        }
+    }
+
     /// Forgets that cgroup `id` was described, when its description did not
     /// reach the queue, and describes it again soon (see [`Self::take_ready`]).
     pub fn retract(&mut self, id: u64) {

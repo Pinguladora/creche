@@ -4,4 +4,5 @@
 //! drives both.
 
 pub mod cgroups;
+pub mod context;
 pub mod queue;
