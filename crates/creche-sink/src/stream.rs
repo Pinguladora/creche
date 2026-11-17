@@ -55,6 +55,8 @@ struct JsonState {
     guard: Option<guard::Handle>,
     /// Whether the stream was told it no longer counts as guarded.
     unguarded: bool,
+    /// Whether the stream's first record was seen.
+    opened: bool,
     /// How long the sink held the stream's next read back itself, in
     /// nanoseconds.
     held_ns: u64,
@@ -65,6 +67,18 @@ fn next(seq: &mut u64) -> u64 {
     let current = *seq;
     *seq = current.saturating_add(1);
     current
+}
+
+/// Notes a record of the stream, `hello` or not. The observer opens every
+/// connection with a hello, so a stream whose first record is anything else,
+/// malformed included, is not the observer (ADR 0020).
+fn opened(state: &mut JsonState, hello: bool) {
+    if !state.opened {
+        state.opened = true;
+        if !hello && let Some(guard) = &state.guard {
+            guard.not_observer();
+        }
+    }
 }
 
 /// Renders `record` with what the stream knows of its process and of the
@@ -247,26 +261,21 @@ impl StreamDecoder {
         self.json.held_ns = u64::try_from(held.as_nanos()).unwrap_or(u64::MAX);
     }
 
-    /// Says once, when two streams of the stream's sandbox were seen sending at
-    /// once, that the stream no longer counts as guarded: its hello line may
-    /// have said it was. Runs with every input, and should run before the
+    /// Says once, when the port of the stream's sandbox was shown not to be
+    /// guarded (see [`guard::Breach`]), that the stream no longer counts as
+    /// guarded: its hello line may have said it was. Runs with every input, and should run before the
     /// stream's end line, for a stream that stayed quiet since.
     pub fn note_guard(&mut self, origin: &Origin, observed_ns: u64, out: &mut Vec<u8>) {
-        let breached = self
-            .json
-            .guard
-            .as_ref()
-            .is_some_and(guard::Handle::breached);
-        if breached && !self.json.unguarded {
+        let breach = self.json.guard.as_ref().and_then(guard::Handle::breach);
+        if let Some(breach) = breach
+            && !self.json.unguarded
+        {
             self.json.unguarded = true;
             self.event(
                 origin,
                 "creche.stream.unguarded",
                 observed_ns,
-                &[(
-                    "creche.stream.unguarded_reason",
-                    Value::Str("concurrent_streams"),
-                )],
+                &[("creche.stream.unguarded_reason", Value::Str(breach.name()))],
                 out,
             );
         }
@@ -312,7 +321,8 @@ fn render_all(
 ) -> Result<usize, DecodeError> {
     let mut records = Records::new(buf);
     for record in &mut records {
-        let record = record?;
+        let record = record.inspect_err(|_| opened(state, false))?;
+        opened(state, matches!(record.body, Body::Hello { .. }));
         let pid = record.header.pid;
         match record.body {
             Body::Task { context, cgroup } => {
@@ -1163,6 +1173,50 @@ mod guard_tests {
         old.held_back(std::time::Duration::ZERO);
         let lines = feed_at(&mut old, &heartbeat(), 2 * LATE);
         assert_eq!(named(&lines, "creche.stream.unguarded").len(), 1);
+    }
+
+    #[test]
+    fn a_stream_that_does_not_open_with_a_hello_is_not_the_observer() {
+        let guard = Arc::default();
+        let mut observer = stream(&guard);
+        feed(&mut observer, &hello(true));
+        // A second sender that never says hello.
+        let lines = feed(&mut stream(&guard), &heartbeat());
+        let unguarded = named(&lines, "creche.stream.unguarded");
+        assert_eq!(unguarded.len(), 1);
+        assert_eq!(unguarded[0]["creche.stream.unguarded_reason"], "no_hello");
+        // The observer hears of it, and no later hello is taken.
+        let lines = feed(&mut observer, &heartbeat());
+        assert_eq!(named(&lines, "creche.stream.unguarded").len(), 1);
+        let later = feed(&mut stream(&guard), &hello(true));
+        assert_eq!(
+            named(&later, "creche.observer.hello")[0]["creche.observer.guarded"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_stream_that_opens_with_a_malformed_record_is_not_the_observer() {
+        let guard = Arc::default();
+        let mut observer = stream(&guard);
+        feed(&mut observer, &hello(true));
+        let mut bad = heartbeat();
+        bad[2..4].copy_from_slice(&3_u16.to_ne_bytes());
+        let mut out = Vec::new();
+        assert!(
+            stream(&guard)
+                .feed_at(&bad, &"sb".into(), 1, &mut out)
+                .is_err()
+        );
+        let lines = feed(&mut observer, &heartbeat());
+        let unguarded = named(&lines, "creche.stream.unguarded");
+        assert_eq!(unguarded[0]["creche.stream.unguarded_reason"], "no_hello");
+        // A malformed record after the hello is only corrupt.
+        let other = Arc::default();
+        let mut first = stream(&other);
+        feed(&mut first, &hello(true));
+        assert!(first.feed_at(&bad, &"sb".into(), 1, &mut out).is_err());
+        assert_eq!(other.breach(), None);
     }
 
     #[test]

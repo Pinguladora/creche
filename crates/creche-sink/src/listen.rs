@@ -705,7 +705,9 @@ fn short(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use creche_wire::{HEARTBEAT_LEN, Header, HeartbeatRecord, Kind};
+    use creche_wire::{
+        HEARTBEAT_LEN, HELLO_LEN, Header, HeartbeatRecord, HelloFlags, HelloRecord, Kind, VERSION,
+    };
     use std::future::Future;
     use std::os::unix::fs::MetadataExt as _;
     use tokio::io::AsyncRead;
@@ -734,6 +736,15 @@ mod tests {
     /// it afterwards.
     fn test_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    /// The record the observer opens every connection with.
+    fn hello() -> HelloRecord {
+        HelloRecord {
+            header: Header::for_observer(Kind::Hello, HELLO_LEN, 9, 1),
+            version: VERSION,
+            flags: HelloFlags::DEDUP,
+        }
     }
 
     fn heartbeat() -> HeartbeatRecord {
@@ -937,13 +948,15 @@ mod tests {
                 [
                     "\"creche.stream.start\" null",
                     "\"creche.observer.heartbeat\" null",
+                    // It did not open with a hello, so it is not the observer.
+                    "\"creche.stream.unguarded\" null",
                     "\"creche.stream.end\" \"corrupt\"",
                     "\"creche.audit.checkpoint\" null",
                 ]
             );
             let report = crate::audit::verify(&output, None);
             assert!(report.intact(), "{report:?}");
-            assert!(report.streams.values().all(|s| s.ended && s.verified == 3));
+            assert!(report.streams.values().all(|s| s.ended && s.verified == 4));
         });
     }
 
@@ -1357,7 +1370,7 @@ mod tests {
             tx,
         ));
         guest
-            .write_all(&[heartbeat().as_bytes(), heartbeat().as_bytes()].concat())
+            .write_all(&[hello().as_bytes(), heartbeat().as_bytes()].concat())
             .await
             .unwrap();
         drop(guest);

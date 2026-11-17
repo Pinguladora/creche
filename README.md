@@ -194,8 +194,9 @@ the pipelines they already feed.
   `creche.stream.id`, opened by a `creche.stream.start` line naming the peer
   (`creche.peer.pid`, `creche.peer.uid`) and closed by `creche.stream.end` with
   `creche.stream.end_reason` (`closed`, `read_error` or `corrupt`). A
-  `creche.stream.unguarded` line, with `creche.stream.unguarded_reason`
-  `concurrent_streams`, says the stream no longer counts as guarded. Every line of a
+  `creche.stream.unguarded` line says the stream no longer counts as guarded,
+  with `creche.stream.unguarded_reason` `concurrent_streams` (two streams sent
+  at once) or `no_hello` (a stream did not open with a hello). Every line of a
   stream has `creche.seq`, counting from 0. A `creche.audit.checkpoint` line
   follows once 256 lines or a second have passed and when the stream ends. It
   covers `creche.seq.first` to `creche.seq.last` with

@@ -33,6 +33,7 @@ and other documents are welcome.
 | [0017 Agents label their cgroups with extended attributes](0017-agent-labels.md) | Accepted |
 | [0018 The kernel names the VMM](0018-kernel-names-the-vmm.md) | Accepted |
 | [0019 The host judges the observer's guard claim](0019-host-judges-the-guard-claim.md) | Accepted |
+| [0020 A stream that does not open with a hello is not the observer](0020-streams-open-with-a-hello.md) | Accepted |
 
 ## Writing a record
 
