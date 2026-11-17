@@ -12,6 +12,21 @@ use libfuzzer_sys::fuzz_target;
 /// Bytes at the start of the input that choose the edit.
 const EDIT: usize = 8;
 
+/// `line`, a checkpoint, with its `creche.seq.last` set to `last`.
+fn stretch(line: &[u8], last: u64) -> Vec<u8> {
+    let key = b"\"creche.seq.last\":";
+    let Some(at) = line.windows(key.len()).position(|w| w == key) else {
+        return line.to_vec();
+    };
+    let digits = at + key.len();
+    let end = digits
+        + line[digits..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+    [&line[..digits], last.to_string().as_bytes(), &line[end..]].concat()
+}
+
 fn is_checkpoint(line: &[u8]) -> bool {
     line.windows(25)
         .any(|w| w == b"\"creche.audit.checkpoint\"")
@@ -43,8 +58,10 @@ fuzz_target!(|input: &[u8]| {
         }
         // The tail cut off, at any line.
         2 => (lines[..at].concat(), true),
-        // One byte of an event line changed. Checkpoints carry fields that
-        // are not checked, so they are left alone.
+        // One byte of an event line changed, and maybe every checkpoint's
+        // range stretched, so it would cover lines that are not there.
+        // Checkpoints carry fields that are not checked, so their other bytes
+        // are left alone.
         _ => {
             let Some(i) = (0..n)
                 .map(|k| (at + k) % n)
@@ -55,8 +72,18 @@ fuzz_target!(|input: &[u8]| {
             let mut line = lines[i].to_vec();
             let pos = usize::from(edit[4]) % line.len();
             line[pos] ^= edit[5].max(1);
-            let mut changed = lines.clone();
-            changed[i] = &line;
+            let mut changed: Vec<Vec<u8>> = lines.iter().map(|l| l.to_vec()).collect();
+            changed[i] = line;
+            if edit[6] & 1 == 1 {
+                let last = if edit[7] == u8::MAX {
+                    u64::MAX
+                } else {
+                    u64::try_from(n).unwrap() + u64::from(edit[7])
+                };
+                for line in changed.iter_mut().filter(|l| is_checkpoint(l)) {
+                    *line = stretch(line, last);
+                }
+            }
             (changed.concat(), true)
         }
     };
