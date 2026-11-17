@@ -527,6 +527,7 @@ mod tests {
             comm: "wget".into(),
             cgroup: "cri-containerd-x.scope".into(),
             container: None,
+            claimed_from_path: false,
         }
     }
 

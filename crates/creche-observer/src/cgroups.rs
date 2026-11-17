@@ -53,6 +53,8 @@ pub struct Cgroups {
     /// Ids to describe once a walk may run again: named too soon after the
     /// last one, or described in a record that did not reach the queue.
     deferred: HashSet<u64>,
+    /// How many of them the last walk did not map.
+    unmapped: usize,
     /// Room for the longest record, which the longest cgroup record fits.
     record: Box<[u8; MAX_RECORD_LEN]>,
 }
@@ -67,6 +69,7 @@ impl Cgroups {
             described: HashSet::new(),
             next_walk_ns: 0,
             deferred: HashSet::new(),
+            unmapped: 0,
             record: Box::new([0; MAX_RECORD_LEN]),
         }
     }
@@ -80,15 +83,15 @@ impl Cgroups {
             return None;
         }
         if !self.paths.contains_key(&id) {
-            if ts_ns < self.next_walk_ns {
+            // Too soon after the last walk, it waits for the next, unless as
+            // many wait unmapped as a walk can map: then it walks now, rather
+            // than forget one. That is a walk per MAX_CGROUPS new cgroups at
+            // most.
+            if ts_ns < self.next_walk_ns && self.unmapped < MAX_CGROUPS {
                 self.defer(id);
                 return None;
             }
-            let started = Instant::now();
-            self.paths = walk(&self.root);
-            let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let gap = took.saturating_mul(WALK_GAP_FACTOR).max(MIN_WALK_GAP_NS);
-            self.next_walk_ns = ts_ns.saturating_add(gap);
+            self.walk(ts_ns);
         }
         // Forgetting them all costs only descriptions sent again.
         if self.described.len() >= MAX_CGROUPS {
@@ -114,6 +117,20 @@ impl Cgroups {
         self.record.get(..len)
     }
 
+    /// Maps every cgroup now, at `ts_ns`, and waits before the next walk. The
+    /// cgroups waiting that it does not find are gone, and stop waiting, so
+    /// those waiting are at most as many as it maps, and the unmapped since.
+    fn walk(&mut self, ts_ns: u64) {
+        let started = Instant::now();
+        self.paths = walk(&self.root);
+        let paths = &self.paths;
+        self.deferred.retain(|id| paths.contains_key(id));
+        self.unmapped = 0;
+        let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let gap = took.saturating_mul(WALK_GAP_FACTOR).max(MIN_WALK_GAP_NS);
+        self.next_walk_ns = ts_ns.saturating_add(gap);
+    }
+
     /// Forgets that cgroup `id` was described, when its description did not
     /// reach the queue, and describes it again soon (see [`Self::take_ready`]).
     pub fn retract(&mut self, id: u64) {
@@ -122,10 +139,14 @@ impl Cgroups {
     }
 
     /// Describes cgroup `id` once a walk may run (see [`Self::take_ready`]),
-    /// if it is not described by then.
+    /// if it is not described by then. At most [`MAX_CGROUPS`] wait unmapped,
+    /// and as many mapped, waiting for room in the queue.
     pub fn defer(&mut self, id: u64) {
-        if self.deferred.len() < MAX_CGROUPS {
-            self.deferred.insert(id);
+        if self.deferred.len() < 2 * MAX_CGROUPS
+            && self.deferred.insert(id)
+            && !self.paths.contains_key(&id)
+        {
+            self.unmapped = self.unmapped.saturating_add(1);
         }
     }
 
@@ -145,6 +166,9 @@ impl Cgroups {
             .deferred
             .drain()
             .partition(|id| walk || paths.contains_key(id));
+        if walk {
+            self.unmapped = 0;
+        }
         self.deferred.extend(waiting);
         ready
     }
@@ -425,12 +449,40 @@ mod tests {
     }
 
     #[test]
+    fn a_full_wait_list_walks_at_once_instead_of_forgetting() {
+        let (tmp, tool) = tree();
+        let mut cgroups = Cgroups::new(tmp.path());
+        assert!(cgroups.describe(ino(&tool), 1, 1).is_some());
+        for id in 0..u64::try_from(MAX_CGROUPS).unwrap() {
+            cgroups.defer(u64::MAX - id);
+        }
+        let late = tool.join("late");
+        fs::create_dir(&late).unwrap();
+        // Within the gap, but the wait list is full.
+        let (path, _, _) = decoded(cgroups.describe(ino(&late), 1, 2).unwrap());
+        assert_eq!(path, "/pod/ctr/agent/tool/late");
+        // The walk did not find those waiting, which are gone: they stop
+        // waiting, and take no room from new ones.
+        assert!(cgroups.deferred.is_empty());
+        // A mapped cgroup waiting for room in the queue is not one to walk for.
+        cgroups.retract(ino(&late));
+        assert_eq!(cgroups.unmapped, 0);
+        // That walk mapped those waiting: the next new one waits again, so a
+        // full wait list does not walk for each new cgroup.
+        let later = tool.join("later");
+        fs::create_dir(&later).unwrap();
+        assert!(cgroups.describe(ino(&later), 1, 3).is_none());
+        assert!(cgroups.deferred.contains(&ino(&later)));
+        assert_eq!(cgroups.unmapped, 1);
+    }
+
+    #[test]
     fn the_cgroups_waiting_stay_bounded() {
         let mut cgroups = Cgroups::new(std::env::temp_dir());
-        for id in 0..=u64::try_from(MAX_CGROUPS).unwrap() {
+        for id in 0..=u64::try_from(2 * MAX_CGROUPS).unwrap() {
             cgroups.retract(id);
         }
-        assert_eq!(cgroups.deferred.len(), MAX_CGROUPS);
+        assert_eq!(cgroups.deferred.len(), 2 * MAX_CGROUPS);
     }
 
     #[test]
