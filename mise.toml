@@ -27,7 +27,7 @@ task.source_freshness_hash_contents = true
 mr-boxington = { version = "1.30.0", workflow = "release.yml@refs/heads/main" }
 # The guest observer ships as a static musl binary (the Kata guest image is not
 # guaranteed to have a compatible libc).
-rust = { version = "1.99.1", mr_boxington = true, components = "clippy,rustfmt", targets = "x86_64-unknown-linux-musl" }
+rust = { version = "1.100.0", mr_boxington = true, components = "clippy,rustfmt", targets = "x86_64-unknown-linux-musl" }
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.150"
 cargo-deny = "0.20.2"
 cocogitto = "7.0.0"
