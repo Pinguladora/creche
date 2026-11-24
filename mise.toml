@@ -29,7 +29,7 @@ mr-boxington = { version = "1.30.0", workflow = "release.yml@refs/heads/main" }
 # guaranteed to have a compatible libc).
 rust = { version = "1.100.0", mr_boxington = true, components = "clippy,rustfmt", targets = "x86_64-unknown-linux-musl" }
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.150"
-cargo-deny = "0.20.2"
+cargo-deny = "0.21.0"
 cocogitto = "7.0.0"
 zizmor = "1.32.0"
 jactionlint = { version = "2.6.0", workflow = "release.yaml" }
