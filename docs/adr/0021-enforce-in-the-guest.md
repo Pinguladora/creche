@@ -19,14 +19,14 @@ cannot write an ancestor's `cgroup.procs` or bypass file permissions
 
 ## Decision
 
-The observer attaches BPF LSM programs to `bprm_check_security`, `mmap_file`
-and `file_mprotect` (executable mappings), `file_open`, `socket_create` and
-`socket_connect`, and cgroup `connect` and `sendmsg` programs for IPv4 and IPv6,
-which also see TCP Fast Open and UDP sent without connecting. They return
-`EPERM` for what the policy forbids. Files match by path prefix and by device
-and inode, addresses by network and port. Raw, packet and ping sockets, whose
-sends name a destination no hook checks, are refused unless the policy allows
-them.
+The observer attaches BPF LSM programs, and cgroup socket programs where an LSM
+hook misses a path, that refuse with `EPERM` what the policy forbids: executing
+files, mapping them as code, opening them, creating sockets, and connecting or
+sending to an address, TCP Fast Open and UDP sent without connecting included.
+Sending data on a connected socket is not checked again. Files match by path
+prefix and by device and inode, addresses by network and port. Raw, packet and
+ping sockets, whose sends name a destination no hook checks, are refused unless
+the policy allows them.
 
 A policy can refuse to execute or map as code any file whose inode changed after
 the policy came into force, so a copied, downloaded or built binary or library
@@ -52,8 +52,8 @@ ancestry. Labels select nothing.
 A policy has a default, allow or deny, and allow, deny or audit rules. It starts
 in audit mode until it says to enforce. Denials, and would-be denials in audit
 mode, go into the audit trail ([0012](0012-audit-chain.md)) with the matching
-rule, at most once a second per process and rule. The observer swaps in each
-policy whole and confirms it by its SHA-256 digest.
+rule, rate-limited per process and rule. The observer swaps in each policy whole
+and confirms it by its SHA-256 digest.
 
 The observer reports ready, and kata-agent starts, only once a policy is in
 force and the guard has seen its programs run: an LSM program can attach and
@@ -62,11 +62,10 @@ LSM is inactive, the sandbox fails to start. A guest image can opt out of this.
 
 From the first policy on, audit mode included, the observer refuses to every
 other process the `bpf` syscall, module loading, tracing or signalling the
-observer, and leaving a ruled cgroup's subtree, by opening a `cgroup.procs` or
-`cgroup.threads` outside it for writing or by cloning into another cgroup. The
-workload starts after that, so it holds no descriptor opened before the first
-policy. Against one opened before a later policy added a rule, the ruled subtree
-holds only as delegation holds it ([0011](0011-identity-within-a-pod.md)).
+observer, and moving a process out of a ruled cgroup's subtree. The workload
+starts after that, so it holds no descriptor opened before the first policy.
+Against one opened before a later policy added a rule, the ruled subtree holds
+only as delegation holds it ([0011](0011-identity-within-a-pod.md)).
 
 ## Alternatives
 
@@ -104,9 +103,9 @@ observer, as the guard does ([0015](0015-observer-guards-its-port.md)). A guest
 kernel compromise undoes it. Between an observer's exit and restart nothing is
 enforced, and the stream's end shows it. In that window another process can
 connect in its place and read the policy, so policies are not secret, but it
-cannot change what the observer enforces. Workloads that need `bpf`, modules or
-`CLONE_INTO_CGROUP` break, and raw sockets and executable anonymous memory work
-only where the policy allows them.
+cannot change what the observer enforces. Workloads that need `bpf` or modules
+break, and raw sockets and executable anonymous memory work only where the
+policy allows them.
 
 Path deny rules are weak: a copy is a new file. Inode matching stops hard links
 and mounts, and the change-time rule stops copies, but also packages installed
