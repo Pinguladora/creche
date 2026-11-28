@@ -28,11 +28,11 @@ and inode, addresses by network and port. Raw, packet and ping sockets, whose
 sends name a destination no hook checks, are refused unless the policy allows
 them.
 
-A policy can refuse to execute or map as code any file whose inode changed
-after the policy came into force, so a copied, downloaded or built binary or
-library does not run, whether exec'd or loaded through the dynamic loader. It
-can also refuse executable anonymous memory, which stops a loader that copies
-code there, and JITs with it.
+A policy can refuse to execute or map as code any file whose inode changed after
+the policy came into force, so a copied, downloaded or built binary or library
+cannot be exec'd or mapped as code, by the dynamic loader or otherwise. It can
+also refuse executable anonymous memory, which stops a loader that copies code
+there, and JITs with it.
 
 Policies are files on the node, such as a mounted ConfigMap, that select pods by
 namespace and name. A pod no file selects gets an empty policy. A pod more than
@@ -42,9 +42,12 @@ after the observer's hello, on the same vsock connection, as wire records
 file changes or a host name in it resolves to new addresses. A running pod that
 no file, or more than one, selects any more keeps the policy in force, and the
 trail says why no replacement came. Relaxing it takes a file that selects it.
-Only the sink writes to the observer's connection, so the policy needs no
-signature. Rules bind a cgroup and apply to its whole subtree, checked through
-the process's cgroup ancestry. Labels select nothing.
+The sink stores the policy in force for each sandbox on the node and sends it
+again after either side restarts. If it has lost it, it sends one that refuses
+everything to the pod's containers, and the trail says why. Only the sink writes
+to the observer's connection, so the policy needs no signature. Rules bind a
+cgroup and apply to its whole subtree, checked through the process's cgroup
+ancestry. Labels select nothing.
 
 A policy has a default, allow or deny, and allow, deny or audit rules. It starts
 in audit mode until it says to enforce. Denials, and would-be denials in audit
@@ -61,7 +64,9 @@ From the first policy on, audit mode included, the observer refuses to every
 other process the `bpf` syscall, module loading, tracing or signalling the
 observer, and leaving a ruled cgroup's subtree, by opening a `cgroup.procs` or
 `cgroup.threads` outside it for writing or by cloning into another cgroup. The
-workload starts after that, so it holds no descriptor opened before.
+workload starts after that, so it holds no descriptor opened before the first
+policy. Against one opened before a later policy added a rule, the ruled subtree
+holds only as delegation holds it ([0011](0011-identity-within-a-pod.md)).
 
 ## Alternatives
 
