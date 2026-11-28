@@ -34,6 +34,7 @@ and other documents are welcome.
 | [0018 The kernel names the VMM](0018-kernel-names-the-vmm.md) | Accepted |
 | [0019 The host judges the observer's guard claim](0019-host-judges-the-guard-claim.md) | Accepted |
 | [0020 A stream that does not open with a hello is not the observer](0020-streams-open-with-a-hello.md) | Accepted |
+| [0021 Enforce policy in the guest with BPF LSM, policy from the host](0021-enforce-in-the-guest.md) | Proposed |
 
 ## Writing a record
 
